@@ -1,0 +1,61 @@
+# ============================================================
+# Gateway API — cluster GatewayClass + shared Gateway (controller: Kong)
+# ns `infra`
+#
+# Gateway API has NO upstream Helm chart — the CRDs are installed from the
+# pinned "standard channel" release manifest (see README.md), and the
+# controller is Kong (release/kong, GatewayAlpha feature gate enabled).
+#
+# This templated manifest is applied AFTER the CRDs + Kong are up:
+#   helmfile template ... | kubectl apply -f -     (or via a raw-chart release)
+# It defines ONE shared multi-tenant Gateway; app teams attach HTTPRoutes
+# (allowedRoutes: from Selector) in their own namespaces.
+# ============================================================
+{{- $env    := .Environment.Name }}
+{{- $g      := .Values }}
+{{- $isDev  := eq $env "dev" }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: kong
+  labels:
+    env: {{ $env }}
+spec:
+  controllerName: konghq.com/kic-gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: platform
+  namespace: infra
+  labels:
+    env: {{ $env }}
+spec:
+  gatewayClassName: kong
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: "true"      # ns opt-in label
+    {{- if not $isDev }}
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: platform-gateway-tls    # issued by cert-manager (see README)
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: "true"
+    {{- end }}

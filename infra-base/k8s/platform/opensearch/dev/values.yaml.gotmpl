@@ -1,0 +1,13 @@
+# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+replicas: 1
+# Single-node dev cluster — skip bootstrap quorum checks.
+singleNode: true
+opensearchJavaOpts: "-Xms512m -Xmx512m"
+
+resources:
+  requests: { cpu: 500m, memory: 1Gi }
+  limits:   { cpu: 1, memory: 2Gi }
+
+persistence:
+  size: 20Gi

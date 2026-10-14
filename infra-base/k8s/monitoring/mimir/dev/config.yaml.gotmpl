@@ -1,0 +1,16 @@
+# dev: only the values that differ per environment — layered after ../config.yaml.gotmpl
+
+mimir:
+  structuredConfig:
+
+    limits:
+      # Retention of shipped blocks in object store (compactor enforces).
+      compactor_blocks_retention_period: 168h
+      # Ingestion guardrails (tune per fleet size).
+      ingestion_rate: 25000
+      ingestion_burst_size: 50000
+      max_global_series_per_user: 500000
+      max_query_lookback: 168h
+
+    compactor:
+      compaction_interval: 1h

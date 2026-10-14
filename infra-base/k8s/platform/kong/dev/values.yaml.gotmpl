@@ -1,0 +1,32 @@
+# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+# ── DB-less ─────────────────────────────────────────────────
+env:
+  log_level: info
+
+# ── Proxy (data plane) ──────────────────────────────────────
+proxy:
+  # ⚠ dev MUST NOT be LoadBalancer. helmDefaults sets `wait: true`, and helm's
+  #   wait blocks until a LoadBalancer Service is given an external IP. kind and
+  #   minikube ship no LB provider, so `status.loadBalancer` stays `{}`, the
+  #   release runs to the 900s timeout and is marked FAILED — while Kong itself
+  #   is 2/2 Running and serving traffic. The failure looks like a broken chart
+  #   and is really a missing cloud controller.
+  #   Matches docs/DEPLOY.md §4 (local → NodePort / port-forward).
+  #   For real LB behaviour at dev: `minikube tunnel` or the metallb addon.
+  type: NodePort
+  http:
+    enabled: true              # non-dev terminates TLS only
+
+replicaCount: 1
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+
+podDisruptionBudget:
+  enabled: false

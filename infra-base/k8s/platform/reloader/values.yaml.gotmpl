@@ -1,0 +1,12 @@
+# Reloader — auto-roll workloads when their ConfigMap/Secret changes.
+# Annotate a Deployment with: reloader.stakater.com/auto: "true"
+reloader:
+  watchGlobally: true
+  reloadStrategy: annotations
+  deployment:
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits:   { cpu: 100m, memory: 128Mi }
+  # Ship metrics to Prometheus.
+  serviceMonitor:
+    enabled: true

@@ -1,0 +1,42 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+replicas: 3
+opensearchJavaOpts: "-Xms1g -Xmx1g"
+
+resources:
+  requests: { cpu: 1, memory: 2Gi }
+  limits:   { cpu: 2, memory: 4Gi }
+
+persistence:
+  size: 50Gi
+# Spread data nodes across nodes/zones; keep quorum during disruptions.
+antiAffinity: hard
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/instance: opensearch
+# staging/prod: replace demo certs. Mount your real certs and point the
+# security plugin at them. Placeholder secret name below.
+secretMounts:
+  - name: opensearch-certs
+    secretName: opensearch-tls
+    path: /usr/share/opensearch/config/certs
+    defaultMode: 0400
+config:
+  opensearch.yml: |
+    cluster.name: opensearch
+    network.host: 0.0.0.0
+    plugins.security.ssl.transport.pemcert_filepath: certs/tls.crt
+    plugins.security.ssl.transport.pemkey_filepath: certs/tls.key
+    plugins.security.ssl.transport.pemtrustedcas_filepath: certs/ca.crt
+    plugins.security.ssl.http.enabled: true
+    plugins.security.ssl.http.pemcert_filepath: certs/tls.crt
+    plugins.security.ssl.http.pemkey_filepath: certs/tls.key
+    plugins.security.ssl.http.pemtrustedcas_filepath: certs/ca.crt
+    plugins.security.allow_default_init_securityindex: true

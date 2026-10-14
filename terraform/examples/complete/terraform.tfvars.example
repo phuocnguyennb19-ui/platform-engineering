@@ -1,0 +1,77 @@
+environment = "dev"
+region      = "ap-southeast-1"
+project     = "platform"
+owner       = "platform-engineering"
+cost_center = "engineering-dev"
+
+vpc_cidr = "10.10.0.0/16"
+az_count = 2
+
+single_nat_gateway = true
+
+enable_flow_logs        = true
+flow_log_retention_days = 7
+
+enable_alb         = true
+enable_eks         = true
+enable_ec2         = false
+enable_rds         = true
+enable_elasticache = false
+enable_lambda      = false
+enable_ecr         = true
+
+enable_route53 = false
+enable_acm     = false
+
+alb_internal                   = false
+alb_ingress_cidrs              = ["0.0.0.0/0"]
+application_port               = 8080
+health_check_path              = "/healthz"
+alb_access_logs_retention_days = 14
+
+kubernetes_version = "1.31"
+
+eks_public_api_access = true
+eks_public_api_cidrs  = ["203.0.113.0/24"]
+
+eks_node_groups = {
+  general = {
+    instance_types = ["t3.large"]
+    capacity_type  = "SPOT"
+    min_size       = 1
+    max_size       = 3
+    desired_size   = 2
+    disk_size      = 50
+  }
+}
+
+rds_engine                = "postgres"
+rds_engine_version        = "16.4"
+rds_family                = "postgres16"
+rds_major_engine_version  = "16"
+rds_instance_class        = "db.t4g.medium"
+rds_allocated_storage     = 20
+rds_max_allocated_storage = 100
+
+rds_multi_az                = false
+rds_backup_retention_period = 3
+
+rds_database_name = "appdb"
+rds_username      = "dbadmin"
+
+ecr_use_name_prefix = false
+
+ecr_repositories = {
+  api = {
+    image_tag_mutability = "IMMUTABLE"
+    scan_on_push         = true
+    untagged_expiry_days = 3
+    keep_tagged_count    = 20
+  }
+}
+
+log_retention_days     = 7
+create_alarm_dashboard = true
+
+alarm_subscriptions = {
+}

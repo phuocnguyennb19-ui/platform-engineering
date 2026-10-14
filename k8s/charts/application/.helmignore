@@ -1,0 +1,20 @@
+# Patterns excluded when packaging the chart.
+
+# VCS / editor / OS
+.DS_Store
+.git/
+.gitignore
+.idea/
+.vscode/
+*.tmproj
+*.swp
+*.bak
+*.orig
+*~
+
+# Test value matrices are a CI input, not part of the shipped artifact.
+ci/
+
+# README.md and UPGRADING.md are deliberately KEPT: `helm show readme` and
+# ArtifactHub read them out of the packaged chart, and 2.0.0 is a breaking
+# release whose upgrade notes must travel with it.

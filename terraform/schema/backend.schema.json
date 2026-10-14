@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "infra-base/terraform/environments/<env>/backend.yaml",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bucket", "region", "encrypt", "use_lockfile"],
+  "properties": {
+    "bucket": { "type": "string", "pattern": "^([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])?$" },
+    "region": { "type": "string", "pattern": "^([a-z]{2}(-gov)?-[a-z]+-[0-9])?$" },
+    "encrypt": { "const": true },
+    "use_lockfile": { "const": true }
+  }
+}

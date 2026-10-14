@@ -1,0 +1,10 @@
+{{- /* Escape hatch — arbitrary manifests shipped with the release, rendered
+       through `tpl` so they can reference values and release metadata.
+
+       Use for the long tail the chart does not model (Kong plugins, Istio
+       VirtualService, IRSA-annotated resources, one-off ConfigMaps ...) instead
+       of a `kubectl apply` outside GitOps. */ -}}
+{{- range .Values.extraObjects }}
+---
+{{ tpl (toYaml .) $ }}
+{{- end }}

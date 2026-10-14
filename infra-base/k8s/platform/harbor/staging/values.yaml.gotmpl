@@ -1,0 +1,57 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+# ── Expose via ingress-nginx ────────────────────────────────
+expose:
+  tls:
+    enabled: true
+  ingress:
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+# ── External PostgreSQL (shared) ────────────────────────────
+database:
+  external:
+    sslmode: disable
+
+# ── External Redis (shared) ─────────────────────────────────
+# ⚠ TOPOLOGY DIFFERS PER ENV. redis/values.yaml.gotmpl runs standalone in
+#   dev/staging (Service `redis-master`) but replication + Sentinel in prod,
+#   where the bitnami chart stops creating `redis-master` entirely. Harbor
+#   supports Sentinel natively via addr=<sentinel hosts> + sentinelMasterSet.
+#
+# ⚠ NOT using `existingSecret` on purpose: the chart resolves it with
+#   `lookup "v1" "Secret" ...` (_helpers.tpl:190), which returns nil whenever
+#   there is no cluster (every `helm template` / `helmfile lint` run) and also
+#   on first install, because the Secret would be created by this same release.
+#   `password` is read straight from SOPS at render time instead — same
+#   exposure as the extraDeploy Secret it replaces, minus the chicken-and-egg.
+redis:
+  external:
+    addr: redis-master.database.svc.{{ .Values.clusterDomain }}:6379
+
+# ── Object storage: MinIO S3 (shared) ───────────────────────
+persistence:
+  # Component-level PVCs (jobservice logs, trivy cache, database if internal).
+  persistentVolumeClaim:
+    jobservice:
+      jobLog:
+        size: 1Gi
+    trivy:
+      size: 5Gi
+
+# ── Component replicas + resources ──────────────────────────
+portal:
+  replicas: 1
+core:
+  replicas: 1
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits:   { cpu: 1, memory: 1Gi }
+registry:
+  replicas: 1
+jobservice:
+  replicas: 1
+
+# ── Internal TLS between components (prod) ──────────────────
+internalTLS:
+  enabled: false

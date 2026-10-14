@@ -1,0 +1,41 @@
+{{- /* `helm test <release>` — a real post-deploy gate for CI/CD, not decoration.
+       Runs as a hook so it never lingers in the namespace. */ -}}
+{{- if and .Values.tests.enabled .Values.service.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "application.fullname" . }}-test-connection
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "test") | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "application.serviceAccountName" . }}
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: {{ .Values.tests.image }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          url="http://{{ include "application.fullname" . }}.{{ include "application.namespace" . }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.tests.path }}"
+          echo "GET $url"
+          wget --spider --timeout={{ .Values.tests.timeoutSeconds }} --tries=1 -S "$url" 2>&1
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits:   { memory: 64Mi }
+{{- end }}

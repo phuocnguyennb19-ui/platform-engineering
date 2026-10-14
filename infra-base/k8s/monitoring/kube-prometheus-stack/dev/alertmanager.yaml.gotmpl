@@ -1,0 +1,13 @@
+# dev: only the values that differ per environment — layered after ../alertmanager.yaml.gotmpl
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    # Used in notification links back to the Alertmanager UI.
+    externalUrl: https://alertmanager.dev.{{ (.Values.ingressDomain | default "example.com") }}
+    storage:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 2Gi

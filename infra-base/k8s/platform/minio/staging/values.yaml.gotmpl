@@ -1,0 +1,18 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+mode: standalone
+replicas: 1
+
+# ── Persistence ─────────────────────────────────────────────
+persistence:
+  size: 50Gi
+
+resources:
+  requests: { cpu: 250m, memory: 1Gi }
+  limits:   { cpu: 1, memory: 2Gi }
+consoleIngress:
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    - secretName: minio-console-tls
+      hosts: [ "minio.{{ .Values.ingressDomain }}" ]

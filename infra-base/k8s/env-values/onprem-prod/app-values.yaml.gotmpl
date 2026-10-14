@@ -1,0 +1,16 @@
+# ============================================================
+# On-prem target overlay for the prod tier — every application on an on-prem
+# prod cluster. Layered right after env-values/prod/app-values.yaml.gotmpl, so
+# replicas, resources, PDB, NetworkPolicy and security defaults stay the tier's;
+# only what differs from the AWS target is set here. Plain YAML: Argo CD reads it.
+# Nothing on-prem deploys while a REPLACE_WITH_ marker is left.
+# ============================================================
+
+global:
+  # Site registry holding each app's image (the ECR repository's counterpart).
+  imageRegistry: "REPLACE_WITH_ONPREM_PROD_REGISTRY"
+
+ingress:
+  annotations:
+    # Site CA ClusterIssuer, created by cert-manager on the on-prem cluster.
+    cert-manager.io/cluster-issuer: "onprem-ca"

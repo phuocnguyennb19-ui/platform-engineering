@@ -1,0 +1,111 @@
+{{- if .Values.service.enabled -}}
+{{- /* Selector is component-scoped: `app` only. Worker and cronjob pods carry a
+       different component label and can therefore never become endpoints of the
+       application Service. */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+  {{- $ann := include "application.annotations" . | trim }}
+  {{- if or $ann .Values.service.annotations }}
+  annotations:
+    {{- if $ann }}
+    {{- $ann | nindent 4 }}
+    {{- end }}
+    {{- with .Values.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- with .Values.service.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  {{- with .Values.service.sessionAffinityConfig }}
+  sessionAffinityConfig:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.service.loadBalancerClass }}
+  loadBalancerClass: {{ . }}
+  {{- end }}
+  {{- with .Values.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.service.internalTrafficPolicy }}
+  internalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.service.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- if .Values.service.publishNotReadyAddresses }}
+  publishNotReadyAddresses: true
+  {{- end }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- with .Values.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
+      {{- with .Values.service.appProtocol }}
+      appProtocol: {{ . }}
+      {{- end }}
+    {{- range .Values.extraPorts }}
+    {{- if ne (toString (.exposeOnService | default true)) "false" }}
+    - name: {{ .name }}
+      port: {{ .servicePort | default .containerPort }}
+      targetPort: {{ .name }}
+      protocol: {{ .protocol | default "TCP" }}
+      {{- with .appProtocol }}
+      appProtocol: {{ . }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.service.extraPorts }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  selector:
+    {{- include "application.componentSelectorLabels" (dict "root" $ "component" "app") | nindent 4 }}
+{{- end }}
+
+{{- /* Headless Service — mandatory for a StatefulSet, optional for anything that
+       needs stable per-pod DNS or client-side load balancing (gRPC). */ -}}
+{{- if or (eq .Values.workload.kind "StatefulSet") .Values.service.headless.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.workload.statefulset.serviceName | default (printf "%s-headless" (include "application.fullname" .)) }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+  {{- with .Values.service.headless.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: {{ .Values.service.headless.publishNotReadyAddresses }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+    {{- range .Values.extraPorts }}
+    - name: {{ .name }}
+      port: {{ .servicePort | default .containerPort }}
+      targetPort: {{ .name }}
+      protocol: {{ .protocol | default "TCP" }}
+    {{- end }}
+  selector:
+    {{- include "application.componentSelectorLabels" (dict "root" $ "component" "app") | nindent 4 }}
+{{- end }}

@@ -1,0 +1,19 @@
+# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+replicaCount: 1
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+config:
+  opensearch_dashboards.yml: |
+    server.name: opensearch-dashboards
+    server.host: "0.0.0.0"
+    # dev: skip verify (demo cert) · staging/prod: full verify (requires a real CA).
+    opensearch.ssl.verificationMode: none
+    opensearch.requestHeadersWhitelist: [authorization, securitytenant]
+
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"

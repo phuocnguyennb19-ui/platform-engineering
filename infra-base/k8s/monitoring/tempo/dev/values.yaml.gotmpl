@@ -1,0 +1,20 @@
+# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+tempo:
+  retention: 48h
+
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+
+# Prometheus must accept remote_write from the metrics-generator.
+# (kube-prometheus-stack sets enableRemoteWriteReceiver — see note in README.)
+
+persistence:
+  size: 10Gi

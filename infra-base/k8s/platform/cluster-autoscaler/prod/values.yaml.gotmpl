@@ -1,0 +1,7 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+extraArgs:
+  scale-down-unneeded-time: 10m
+
+# ── Availability ────────────────────────────────────────────
+replicaCount: 2

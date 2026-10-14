@@ -1,0 +1,74 @@
+# dev: only the values that differ per environment — layered after ../platform.yaml.gotmpl
+
+additionalPrometheusRulesMap:
+  platform-cert-manager:
+    groups:
+      - name: cert-manager
+        rules:
+          - alert: CertManagerCertificateExpiringSoon
+            expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 21 * 24 * 3600
+            for: 1h
+            labels: { severity: warning, env: dev }
+            annotations:
+              summary: "Certificate {{`{{ $labels.name }}`}} expires in under 21 days"
+              description: "cert-manager has not renewed {{`{{ $labels.name }}`}}; it expires in {{`{{ $value | humanizeDuration }}`}}."
+          - alert: CertManagerCertificateExpiryCritical
+            expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 7 * 24 * 3600
+            for: 1h
+            labels: { severity: critical, env: dev }
+            annotations:
+              summary: "Certificate {{`{{ $labels.name }}`}} expires in under 7 days"
+              description: "Renewal is failing for {{`{{ $labels.name }}`}}; check the Certificate, CertificateRequest and Order events."
+          - alert: CertManagerCertificateNotReady
+            expr: certmanager_certificate_ready_status{condition="False"} == 1
+            for: 15m
+            labels: { severity: warning, env: dev }
+            annotations:
+              summary: "Certificate {{`{{ $labels.name }}`}} is not Ready"
+              description: "Certificate {{`{{ $labels.name }}`}} has been Ready=False for 15m."
+
+  platform-ingress-nginx:
+    groups:
+      - name: ingress-nginx
+        rules:
+          - alert: IngressNginxHighErrorRate
+            expr: |
+              sum by (ingress) (rate(nginx_ingress_controller_requests{status=~"5.."}[5m]))
+              / clamp_min(sum by (ingress) (rate(nginx_ingress_controller_requests[5m])), 0.001)
+              > 0.05
+            for: 10m
+            labels: { severity: critical, env: dev }
+            annotations:
+              summary: "Ingress {{`{{ $labels.ingress }}`}} 5xx ratio above 5%"
+              description: "5xx ratio is {{`{{ $value | humanizePercentage }}`}} over 5m."
+
+  platform-velero:
+    groups:
+      - name: velero
+        rules:
+          - alert: VeleroBackupFailed
+            expr: increase(velero_backup_failure_total[1h]) > 0
+            for: 5m
+            labels: { severity: warning, env: dev }
+            annotations:
+              summary: "Velero backup failed for schedule {{`{{ $labels.schedule }}`}}"
+              description: "{{`{{ $value }}`}} failed backups in the last hour."
+          - alert: VeleroBackupTooOld
+            expr: time() - velero_backup_last_successful_timestamp{schedule!=""} > 26 * 3600
+            for: 15m
+            labels: { severity: critical, env: dev }
+            annotations:
+              summary: "No successful Velero backup for schedule {{`{{ $labels.schedule }}`}} in 26h"
+              description: "Last success was {{`{{ $value | humanizeDuration }}`}} ago."
+
+  platform-external-secrets:
+    groups:
+      - name: external-secrets
+        rules:
+          - alert: ExternalSecretNotSynced
+            expr: externalsecret_status_condition{condition="Ready",status="False"} == 1
+            for: 15m
+            labels: { severity: warning, env: dev }
+            annotations:
+              summary: "ExternalSecret {{`{{ $labels.name }}`}} is not syncing"
+              description: "ExternalSecret {{`{{ $labels.name }}`}} has been Ready=False for 15m; the target Secret is stale or missing."

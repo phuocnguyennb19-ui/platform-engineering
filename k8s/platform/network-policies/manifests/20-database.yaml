@@ -1,0 +1,214 @@
+# ============================================================
+# DATABASE TIER — workload-scoped policies, namespace `database`
+#
+# One policy per engine, each selecting only its own pods. The namespace-wide
+# default-deny lives in 00-baseline.yaml.
+#
+# ⚠ LABEL VERIFICATION STATUS — read before trusting this file.
+#   Only MINIO is verified against a running pod (`app: minio`, confirmed by
+#   the policy selecting minio-75cd5b9b5c). postgresql, redis, kafka and
+#   clickhouse are NOT DEPLOYED on this cluster, so their selectors below are
+#   the Bitnami chart convention, not observed fact. A wrong selector does not
+#   error — it matches nothing, and the workload silently keeps only the
+#   namespace default-deny, i.e. it becomes UNREACHABLE.
+#   Verify each one as it is deployed:
+#     kubectl -n database get pods --show-labels
+#
+# ⚠ Chart-native policies at PROD: redis/kafka/clickhouse set
+#   `networkPolicy.enabled: {{ $isProd }}` with `allowExternal: false`, which
+#   admits only pods labelled <release>-client=true. Those UNION with these
+#   rules, so prod access is the sum of both, not the stricter of the two.
+# ============================================================
+
+# ── postgresql ──────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-postgresql
+  namespace: database
+  labels: { workload: postgresql }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  policyTypes: [Ingress]
+  ingress:
+    # Streaming replication between primary and read replicas.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - { protocol: TCP, port: 5432 }
+    # App tier (be-user/values.yaml.gotmpl → DB_HOST) and Harbor's registry DB.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [dev, staging, prod, harbor]
+      ports:
+        - { protocol: TCP, port: 5432 }
+    # postgres-exporter sidecar (metrics.enabled: true).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 9187 }
+---
+# ── redis ───────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-redis
+  namespace: database
+  labels: { workload: redis }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes: [Ingress]
+  ingress:
+    # Replication + sentinel quorum between redis pods.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - { protocol: TCP, port: 6379 }
+        - { protocol: TCP, port: 26379 }
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [dev, staging, prod, harbor]
+      ports:
+        - { protocol: TCP, port: 6379 }
+        - { protocol: TCP, port: 26379 }   # harbor/values.yaml.gotmpl uses sentinel
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 9121 }    # redis-exporter
+---
+# ── kafka ───────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-kafka
+  namespace: database
+  labels: { workload: kafka }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  policyTypes: [Ingress]
+  ingress:
+    # Inter-broker replication + KRaft controller quorum. Breaking this does
+    # not fail loudly — the cluster loses quorum and stalls.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+      ports:
+        - { protocol: TCP, port: 9092 }    # client
+        - { protocol: TCP, port: 9093 }    # controller (KRaft)
+        - { protocol: TCP, port: 9094 }    # inter-broker
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [dev, staging, prod]
+      ports:
+        - { protocol: TCP, port: 9092 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 5556 }    # jmx-exporter    (metrics.jmx)
+        - { protocol: TCP, port: 9308 }    # kafka-exporter  (metrics.kafka)
+---
+# ── clickhouse ──────────────────────────────────────────────
+# ⚠ Port 9000 (native protocol) is deliberately NOT granted to the app tier —
+#   it collides with MinIO's S3 port, and a namespace-wide 9000 allow would
+#   hand apps unauthenticated ClickHouse access. Apps use 8123 or 9440.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-clickhouse
+  namespace: database
+  labels: { workload: clickhouse }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+      ports:
+        - { protocol: TCP, port: 9000 }    # native, inter-server
+        - { protocol: TCP, port: 9009 }    # interserver replication
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [dev, staging, prod]
+      ports:
+        - { protocol: TCP, port: 8123 }    # HTTP
+        - { protocol: TCP, port: 9440 }    # native TLS
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 8001 }    # built-in prometheus endpoint
+---
+# ── minio ───────────────────────────────────────────────────
+# The most-consumed workload in the cluster: object store for mimir, loki,
+# tempo (observability), velero backups, harbor image layers, and the app tier.
+# Selector VERIFIED against the running pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-minio
+  namespace: database
+  labels: { workload: minio }
+spec:
+  podSelector:
+    matchLabels:
+      app: minio
+  policyTypes: [Ingress]
+  ingress:
+    # Distributed erasure set (prod: replicas 4). No-op at dev/staging
+    # (mode: standalone) but required before the prod topology comes up.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - { protocol: TCP, port: 9000 }
+    # S3 API + the /minio/v2/metrics scrape, which shares the same port.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [observability, velero, harbor, dev, staging, prod]
+      ports:
+        - { protocol: TCP, port: 9000 }
+    # Console UI via ingress-nginx (minio/values.yaml.gotmpl → ingress).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+      ports:
+        - { protocol: TCP, port: 9001 }

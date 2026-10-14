@@ -1,0 +1,11 @@
+application:
+  name: three
+
+runtime:
+  type: eks
+
+image:
+  repository: three
+
+container:
+  port: 8080

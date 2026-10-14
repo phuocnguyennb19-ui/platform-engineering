@@ -1,0 +1,33 @@
+# ============================================================
+# loki — log aggregation. Order: after minio (object storage).
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f loki/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../infra-base/k8s/env-values/environments.yaml
+  - ../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: loki
+    namespace: observability
+    chart: grafana/loki
+    version: 7.1.0
+    missingFileHandler: Warn
+    labels: { name: loki, layer: platform, tier: infra, component: logs, env: "{{ $env }}" }
+    values:
+      - ../../infra-base/k8s/monitoring/loki/values.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/loki/{{ .Environment.Name }}/values.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/loki/config.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/loki/{{ .Environment.Name }}/config.yaml.gotmpl

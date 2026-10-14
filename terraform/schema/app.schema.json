@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "applications/<app>/terraform/app.yaml",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "application",
+    "runtime",
+    "image",
+    "container"
+  ],
+  "properties": {
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        }
+      }
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        }
+      }
+    },
+    "container": {
+      "$ref": "#/$defs/container"
+    },
+    "network": {
+      "$ref": "#/$defs/network"
+    }
+  },
+  "$defs": {
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "ecs",
+            "eks"
+          ]
+        }
+      }
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$",
+      "not": {
+        "const": "latest"
+      }
+    },
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "health_check_command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "health_check_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "readonly_root_filesystem": {
+          "type": "boolean"
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^(/|(/[A-Za-z0-9._~-]+)+)$"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+# ============================================================
+# Redis — cache / ephemeral store / rate-limit backend
+# Chart: bitnami/redis · ns `database`
+#
+# Topology:
+#   dev/staging → architecture=standalone (1 master, no replicas)
+#   prod        → architecture=replication + Sentinel (auto-failover HA)
+#
+# ⚠ Bitnami image caveat — mirror via Harbor in prod (see postgresql/README).
+#
+# Secrets (SOPS → .Values.secrets.redis.password) → AUTH password.
+#
+# What lives where:
+#   values.yaml.gotmpl → topology, sizing, persistence, sentinel, metrics
+#   Secret (SOPS)      → AUTH password (existingSecret)
+#   files/            → redis.conf overrides via `commonConfiguration`
+# ============================================================
+
+fullnameOverride: redis
+
+global:
+  imageRegistry: {{ printf "%s.dkr.ecr.%s.amazonaws.com" (requiredEnv "AWS_ACCOUNT_ID") (env "AWS_REGION" | default "ap-southeast-1") | quote }}   # ECR mirror, filled by images:mirror
+  security:
+    # The chart rejects any registry but docker.io; the mirror holds the same
+    # bitnamilegacy images, copied by digest. This disables only that origin check.
+    allowInsecureImages: true
+  redis:
+    password: ""                       # unused — we use auth.existingSecret below
+
+auth:
+  enabled: true
+  existingSecret: redis
+  existingSecretPasswordKey: redis-password
+
+extraDeploy:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: redis
+      namespace: database
+    type: Opaque
+    stringData:
+      redis-password: {{ .Values.secrets.redis.password | quote }}
+
+# ── Shared config: mounted as ConfigMap from files/redis.conf ──
+# readFile keeps the redis.conf as the source of truth; the chart renders it
+# into a ConfigMap and mounts it on master + replicas.
+commonConfiguration: |-
+{{ readFile "files/redis.conf" | indent 2 }}
+
+master:
+  count: 1
+  persistence:
+    enabled: true
+  podSecurityContext:
+    enabled: true
+    fsGroup: 1001
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 1001
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    seccompProfile: { type: RuntimeDefault }
+    capabilities: { drop: [ ALL ] }
+  pdb:
+    maxUnavailable: 1
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+networkPolicy:
+  allowExternal: false

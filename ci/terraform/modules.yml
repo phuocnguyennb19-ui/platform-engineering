@@ -1,0 +1,72 @@
+# Terraform modules (was terraform-module). Included by the root .gitlab-ci.yml; runs from terraform/.
+.tfm-job:
+  image:
+    name: "hashicorp/terraform:${TF_VERSION}"
+    entrypoint: [""]
+  inherit:
+    default: false
+  before_script:
+    - cd "$CI_PROJECT_DIR/terraform"
+  rules:
+    - if: $PIPELINE_PART != "all" || $CI_PIPELINE_SOURCE == "pipeline" || $CI_PIPELINE_SOURCE == "trigger"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: &tfm-changes
+        - "terraform/modules/**/*"
+        - "terraform/examples/**/*"
+        - ci/terraform/modules.yml
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: *tfm-changes
+    - if: $CI_COMMIT_TAG
+
+modules:fmt:
+  extends: .tfm-job
+  stage: lint
+  script:
+    - terraform fmt -check -recursive modules examples
+
+modules:typed-inputs-only:
+  extends: .tfm-job
+  stage: lint
+  script:
+    - |
+      if grep -rnE 'yamldecode|global_config|config_file' --include='*.tf' modules; then
+        echo "modules take typed Terraform inputs only — no YAML, no global_config, no config files"
+        exit 1
+      fi
+    - |
+      if find . -maxdepth 1 -name '*.tf' | grep -q .; then
+        echo "terraform/ holds no root .tf — composition belongs to terraform/stacks"
+        exit 1
+      fi
+
+modules:validate:
+  extends: .tfm-job
+  stage: validate
+  script:
+    - |
+      fail=0
+      for d in modules/*/ examples/complete/; do
+        if (cd "$d" && terraform init -backend=false -input=false >/dev/null && terraform validate -no-color >/dev/null); then
+          echo "ok    $d"
+        else
+          echo "FAIL  $d"; (cd "$d" && terraform validate -no-color) || true; fail=1
+        fi
+      done
+      exit $fail
+
+modules:contract-tests:
+  extends: .tfm-job
+  stage: test
+  image:
+    name: "hashicorp/terraform:${TF_TEST_VERSION}"
+    entrypoint: [""]
+  script:
+    - |
+      fail=0
+      for d in modules/*/; do
+        [ -d "${d}tests" ] || continue
+        echo "== $d"
+        (cd "$d" && terraform init -backend=false -input=false >/dev/null && terraform test -no-color) || fail=1
+      done
+      exit $fail

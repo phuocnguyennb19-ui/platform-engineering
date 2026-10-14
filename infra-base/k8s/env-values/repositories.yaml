@@ -1,0 +1,77 @@
+# ============================================================
+# Chart repositories + Helm defaults — BASE file (`bases:`).
+#
+# Included by every per-tool helmfile so each release resolves its
+# upstream chart from the same repos with the same safe defaults.
+# ============================================================
+repositories:
+  # ── Observability ──
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: grafana
+    url: https://grafana.github.io/helm-charts
+  - name: open-telemetry
+    url: https://open-telemetry.github.io/opentelemetry-helm-charts
+  - name: opensearch
+    url: https://opensearch-project.github.io/helm-charts
+
+  # ── Platform / foundation ──
+  - name: metrics-server
+    url: https://kubernetes-sigs.github.io/metrics-server/
+  - name: ingress-nginx
+    url: https://kubernetes.github.io/ingress-nginx
+  - name: jetstack                       # cert-manager
+    url: https://charts.jetstack.io
+  - name: external-secrets
+    url: https://charts.external-secrets.io
+
+  # ── Delivery / ops ──
+  - name: argo
+    url: https://argoproj.github.io/argo-helm
+  - name: vmware-tanzu                   # velero
+    url: https://vmware-tanzu.github.io/helm-charts
+  - name: stakater                       # reloader
+    url: https://stakater.github.io/stakater-charts
+  - name: minio                          # object store (Mimir/Loki/Harbor/Velero backend)
+    url: https://charts.min.io/
+
+  # ── Data stores ──
+  # NOTE (Bitnami, 2025+): docker.io/bitnami now serves only `latest`; pinned
+  # tags moved to the paid `bitnamisecure` repo and old tags to `bitnamilegacy`.
+  # For prod, mirror images into Harbor (proxy-cache project `bitnami`) and set
+  # each release's global.imageRegistry to harbor.<domain>. See per-tool README.
+  - name: bitnami                        # postgresql, redis, kafka, clickhouse
+    url: https://charts.bitnami.com/bitnami
+
+  # ── Governance / security ──
+  - name: kyverno
+    url: https://kyverno.github.io/kyverno/
+  - name: aqua                           # trivy-operator
+    url: https://aquasecurity.github.io/helm-charts/
+  - name: hashicorp                      # vault
+    url: https://helm.releases.hashicorp.com
+  - name: sealed-secrets                 # bitnami-labs sealed-secrets (Updated URL)
+    url: https://bitnami.github.io/sealed-secrets
+  - name: falcosecurity                  # falco (runtime threat detection)
+    url: https://falcosecurity.github.io/charts
+
+  # ── Platform / delivery ──
+  - name: harbor                         # container registry
+    url: https://helm.goharbor.io
+  - name: kedacore                       # KEDA event-driven autoscaling
+    url: https://kedacore.github.io/charts
+  - name: external-dns                   # sigs external-dns
+    url: https://kubernetes-sigs.github.io/external-dns/
+  - name: autoscaler                     # cluster-autoscaler
+    url: https://kubernetes.github.io/autoscaler
+  - name: kong                           # kong gateway / gateway-api controller
+    url: https://charts.konghq.com
+
+helmDefaults:
+  wait: true
+  waitForJobs: true
+  timeout: 900
+  createNamespace: false      # first release owns namespace creation
+  atomic: false               # prevent instant rollback on slow CRD establishment
+  cleanupOnFail: false        # SAFEST FOR PROD: preserves resources for debugging failed releases
+  historyMax: 5

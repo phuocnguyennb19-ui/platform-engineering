@@ -1,0 +1,33 @@
+# ============================================================
+# grafana — dashboards. Order: after loki, tempo, opensearch (datasources point at them).
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f grafana/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../infra-base/k8s/env-values/environments.yaml
+  - ../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: grafana
+    namespace: observability
+    chart: grafana/grafana
+    version: 8.15.0
+    missingFileHandler: Warn
+    labels: { name: grafana, layer: platform, tier: infra, component: metrics, env: "{{ $env }}" }
+    values:
+      - ../../infra-base/k8s/monitoring/grafana/values.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/grafana/{{ .Environment.Name }}/values.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/grafana/datasources.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/grafana/{{ .Environment.Name }}/datasources.yaml.gotmpl

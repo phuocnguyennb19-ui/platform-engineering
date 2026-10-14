@@ -1,0 +1,11 @@
+application:
+  name: api
+
+runtime:
+  type: ecs
+
+image:
+  repository: api
+
+container:
+  port: 9000

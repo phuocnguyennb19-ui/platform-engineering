@@ -1,0 +1,94 @@
+# ============================================================
+# TLS material for the Vault server listener (staging/prod).
+#
+# vault/values.yaml.gotmpl sets global.tlsDisable=false for every
+# non-dev env and mounts the Secret `vault-tls` at /vault/userconfig/vault-tls.
+# Without this Certificate that Secret never exists and Vault fails to start:
+#   "error loading TLS cert: open /vault/userconfig/vault-tls/tls.crt: no such file"
+#
+# Apply AFTER cert-manager is Ready and BEFORE the vault release:
+#   kubectl apply -f vault/manifests/certificate.yaml
+#
+# A private CA is used rather than Let's Encrypt: the SANs are in-cluster DNS
+# names that a public ACME CA cannot validate. Consumers (ESO, the Agent
+# Injector, `vault` CLI) trust it via VAULT_CACERT / the ca.crt key.
+#
+# Rotation is automatic — cert-manager renews at 2/3 of the lifetime. Vault
+# does NOT hot-reload the listener cert, so pair this with stakater/reloader
+# (already deployed in ) or roll the StatefulSet after renewal.
+# ============================================================
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+# Root CA for internal service-to-service TLS, kept in the vault namespace.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-ca
+  namespace: vault
+spec:
+  isCA: true
+  commonName: vault-internal-ca
+  secretName: vault-ca
+  duration: 87600h      # 10y
+  renewBefore: 720h     # 30d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vault-ca
+  namespace: vault
+spec:
+  ca:
+    secretName: vault-ca
+---
+# Server certificate. SANs must cover every address a peer or client uses:
+#   · the headless per-pod DNS used by retry_join (vault-N.vault-internal)
+#   · the ClusterIP Service (vault, vault.vault, …svc.cluster.local)
+#   · 127.0.0.1 for the in-container health probes and VAULT_ADDR
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: vault
+spec:
+  secretName: vault-tls
+  duration: 2160h       # 90d
+  renewBefore: 360h     # 15d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: vault-ca
+    kind: Issuer
+    group: cert-manager.io
+  commonName: vault.vault.svc.cluster.local
+  dnsNames:
+    - vault
+    - vault.vault
+    - vault.vault.svc
+    - vault.vault.svc.cluster.local
+    - vault-internal
+    - vault-internal.vault.svc.cluster.local
+    # Per-pod names for Raft retry_join. Extend if server.ha.replicas grows
+    # beyond 3 (the prod value in the $size table).
+    - vault-0.vault-internal
+    - vault-1.vault-internal
+    - vault-2.vault-internal
+    - vault-0.vault-internal.vault.svc.cluster.local
+    - vault-1.vault-internal.vault.svc.cluster.local
+    - vault-2.vault-internal.vault.svc.cluster.local
+  ipAddresses:
+    - 127.0.0.1

@@ -1,0 +1,11 @@
+application:
+  name: wrong
+
+runtime:
+  type: ecs
+
+image:
+  repository: shared
+
+resources:
+  cpu: 256

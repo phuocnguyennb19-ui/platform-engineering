@@ -1,0 +1,49 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+deploymentMode: SimpleScalable
+# Not used in SimpleScalable mode:
+singleBinary:
+  replicas: 0
+
+backend:
+  replicas: 2
+  persistence:
+    size: 50Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 1, memory: 2Gi }
+read:
+  replicas: 2
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 1, memory: 2Gi }
+write:
+  replicas: 2
+  persistence:
+    size: 50Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 1, memory: 2Gi }
+
+# nginx gateway — stable in-cluster entrypoint used by Grafana/Alloy.
+gateway:
+  replicas: 2
+lokiCanary:
+  enabled: true
+chunksCache:
+  enabled: true
+  allocatedMemory: 2048
+resultsCache:
+  enabled: true
+
+# ── SimpleScalable mode (prod) ──────────────────────────────
+serviceAccount:
+  create: true
+  annotations: {}
+  # eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/loki-prod

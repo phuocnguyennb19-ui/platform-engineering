@@ -1,0 +1,26 @@
+# ============================================================
+# Local BASE file — included by every local helmfile state (`bases:`), so each
+# one sees the same `local` environment and the same pinned kube context.
+# Counterpart of infra-base/k8s/env-values/{environments,repositories}.yaml.
+#
+# kubeContext defaults to `minikube`; LOCAL_KUBE_CONTEXT overrides it. Every
+# release is pinned to it, so no local state ever acts on a cloud cluster,
+# whatever `kubectl config current-context` says.
+# ============================================================
+environments:
+  local:
+    values:
+      - env: local
+        kubeContext: {{ env "LOCAL_KUBE_CONTEXT" | default "minikube" }}
+        namespace: local
+        ingressClass: nginx            # minikube / kind ingress-nginx addon
+        ingressDomain: localhost       # *.localhost resolves to 127.0.0.1
+
+---
+
+helmDefaults:
+  kubeContext: {{ .Values.kubeContext }}
+  wait: true
+  waitForJobs: true
+  timeout: 300
+  historyMax: 5

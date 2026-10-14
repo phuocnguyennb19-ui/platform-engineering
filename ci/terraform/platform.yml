@@ -1,0 +1,310 @@
+# Terraform composition (was platform-engine). Included by the root .gitlab-ci.yml.
+# Jobs run from terraform/; state keys are unchanged (<env>/core/core.tfstate, ...).
+.tfp-guard:
+  rules:
+    - if: $PIPELINE_PART == "k8s" || $CI_PIPELINE_SOURCE == "trigger"
+      when: never
+    - if: $CI_PIPELINE_SOURCE !~ /^(pipeline|web|merge_request_event)$/ && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: never
+
+.tfp-changes: &tfp-changes
+  changes:
+    - "terraform/**/*"
+    - "infra-base/terraform/**/*"          # environment values (environments/<env>/)
+    - "applications/*/terraform/**/*"
+    - "ci/terraform/**/*"
+    - .gitlab-ci.yml
+
+.terraform:
+  image:
+    name: ${TF_IMAGE}
+    entrypoint: [""]
+  inherit:
+    default: false
+  id_tokens:
+    AWS_OIDC_TOKEN:
+      aud: $CI_SERVER_URL
+  before_script:
+    - cd "$CI_PROJECT_DIR/terraform"
+    - set -eu
+    - apk add --no-cache "$YQ_APK" ${EXTRA_APK:-}
+    - BACKEND="../infra-base/terraform/environments/${ENVIRONMENT}/backend.yaml"
+    - TF_STATE_BUCKET="$(yq '.bucket // ""' "$BACKEND")"
+    - TF_STATE_REGION="$(yq '.region // ""' "$BACKEND")"
+    - '[ -n "$TF_STATE_BUCKET" ] && [ -n "$TF_STATE_REGION" ] || { echo "${BACKEND}: bucket and region are required"; exit 1; }'
+    - '[ "$(yq ".encrypt" "$BACKEND")" = true ] && [ "$(yq ".use_lockfile" "$BACKEND")" = true ] || { echo "${BACKEND}: encrypt and use_lockfile must be true"; exit 1; }'
+    - '[ -n "${AWS_ROLE_ARN:-}" ] || { echo "set TF_PLAN_ROLE_ARN and TF_APPLY_ROLE_ARN scoped to environment ${ENVIRONMENT}"; exit 1; }'
+    - printf '%s' "$AWS_OIDC_TOKEN" > "${CI_PROJECT_DIR}/.web-identity-token"
+    - export AWS_WEB_IDENTITY_TOKEN_FILE="${CI_PROJECT_DIR}/.web-identity-token" AWS_ROLE_SESSION_NAME="gitlab-${CI_PROJECT_ID}-${CI_JOB_ID}"
+    - export TF_VAR_environment="$ENVIRONMENT"
+    - cd "$STACK_DIR"
+    - terraform init
+      -backend-config="bucket=${TF_STATE_BUCKET}"
+      -backend-config="key=${STATE_KEY}"
+      -backend-config="region=${TF_STATE_REGION}"
+      -backend-config="encrypt=true"
+      -backend-config="use_lockfile=true"
+
+.plan:
+  extends: .terraform
+  stage: plan
+  needs: [check-inputs, config, validate]
+  environment:
+    name: ${ENVIRONMENT}
+    action: prepare
+  variables:
+    AWS_ROLE_ARN: ${TF_PLAN_ROLE_ARN}
+  script:
+    - terraform plan -out=tfplan
+    - terraform show -no-color tfplan > plan.txt
+  artifacts:
+    access: developer
+    expire_in: 7 days
+    paths:
+      - terraform/${STACK_DIR}/tfplan
+      - terraform/${STACK_DIR}/plan.txt
+
+.apply:
+  extends: .terraform
+  stage: apply
+  environment:
+    name: ${ENVIRONMENT}
+  variables:
+    AWS_ROLE_ARN: ${TF_APPLY_ROLE_ARN}
+  script:
+    - DELETES="$(terraform show -json tfplan | yq -p=json '[(.resource_changes // [])[] | select(.change.actions | contains(["delete"]))] | length')"
+    - '[ "${DESTROY_GUARD:-false}" != true ] || [ "$DELETES" = 0 ] || { echo "plan deletes ${DELETES} resources: automatic apply refused, run the pipeline from the web UI and apply manually"; exit 1; }'
+    - terraform apply tfplan
+  resource_group: ${ENVIRONMENT}-${STATE_KEY}
+
+check-inputs:
+  stage: validate
+  inherit:
+    default: false
+  rules:
+    - !reference [.tfp-guard, rules]
+    - when: on_success
+      <<: *tfp-changes
+  image: alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+  script:
+    - cd "$CI_PROJECT_DIR/terraform"
+    - set -eu
+    - '[ -z "${IMAGE_REPOSITORY:-}" ] || { echo "IMAGE_REPOSITORY is not accepted: the repository comes from applications/<app>/terraform/app.yaml"; exit 1; }'
+    - echo "$ENVIRONMENT" | grep -qE '^[a-z][a-z0-9-]{1,31}$' || { echo "ENVIRONMENT '${ENVIRONMENT}' is not a valid environment name"; exit 1; }
+    - for f in environment core backend; do test -f "../infra-base/terraform/environments/${ENVIRONMENT}/${f}.yaml" || { echo "../infra-base/terraform/environments/${ENVIRONMENT}/${f}.yaml not found"; exit 1; }; done
+    - |
+      if [ -n "$APP_NAME" ]; then
+        echo "$APP_NAME" | grep -qE '^[a-z0-9][a-z0-9-]{0,62}$' || { echo "APP_NAME '${APP_NAME}' is not a valid application name"; exit 1; }
+        test -f "../applications/${APP_NAME}/terraform/app.yaml" || { echo "applications/${APP_NAME}/terraform/app.yaml not found"; exit 1; }
+        test -f "../applications/${APP_NAME}/terraform/${ENVIRONMENT}.yaml" || { echo "applications/${APP_NAME}/terraform/${ENVIRONMENT}.yaml not found: ${APP_NAME} is not enabled in ${ENVIRONMENT}"; exit 1; }
+        [ "$IMAGE_TAG" != "latest" ] || { echo "IMAGE_TAG must not be latest"; exit 1; }
+      fi
+    - echo "environment=${ENVIRONMENT} app=${APP_NAME:-<platform>} tag=${IMAGE_TAG:-<from config>}"
+
+config:
+  stage: validate
+  inherit:
+    default: false
+  rules:
+    - !reference [.tfp-guard, rules]
+    - when: on_success
+      <<: *tfp-changes
+  image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  script:
+    - cd "$CI_PROJECT_DIR/terraform"
+    - 'pip install --quiet --require-hashes --only-binary=:all: -r ../ci/terraform/requirements.txt'
+    - yamllint --strict ../infra-base/terraform/environments ../applications/*/terraform
+    - check-jsonschema --check-metaschema schema/*.json
+    - for t in environment core backend; do check-jsonschema --schemafile "schema/${t}.schema.json" ../infra-base/terraform/environments/*/"${t}.yaml"; done
+    - find ../applications -path '*/terraform/app.yaml' -exec check-jsonschema --schemafile schema/app.schema.json {} +
+    - find ../applications -path '*/terraform/*.yaml' ! -name app.yaml -exec check-jsonschema --schemafile schema/app-environment.schema.json {} +
+
+validate:
+  stage: validate
+  image:
+    name: ${TF_IMAGE}
+    entrypoint: [""]
+  inherit:
+    default: false
+  rules:
+    - !reference [.tfp-guard, rules]
+    - when: on_success
+      <<: *tfp-changes
+  script:
+    - cd "$CI_PROJECT_DIR/terraform"
+    - terraform fmt -check -recursive stacks shared tests
+    - |
+      set -e
+      for d in stacks/core stacks/registry stacks/service; do
+        echo "== ${d}"
+        (cd "$d" && terraform init -backend=false >/dev/null && terraform validate)
+      done
+      echo "== tests"
+      (cd tests && terraform init -backend=false -test-directory=. >/dev/null && terraform test -test-directory=.)
+
+.core:
+  variables:
+    STACK_DIR: stacks/core
+    STATE_KEY: ${ENVIRONMENT}/core/core.tfstate
+
+plan:core:
+  extends: [.plan, .core]
+  rules:
+    - !reference [.tfp-guard, rules]
+    - if: $APP_NAME != ""
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      <<: *tfp-changes
+    - if: $CI_PIPELINE_SOURCE == "web"
+      <<: *tfp-changes
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      <<: *tfp-changes
+
+apply:core:
+  extends: [.apply, .core]
+  needs: [plan:core]
+  rules:
+    - !reference [.tfp-guard, rules]
+    - if: $APP_NAME != ""
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      <<: *tfp-changes
+
+.registry:
+  variables:
+    STACK_DIR: stacks/registry
+    STATE_KEY: ${ENVIRONMENT}/registry/registry.tfstate
+
+plan:registry:
+  extends: [.plan, .registry]
+  rules:
+    - !reference [.tfp-guard, rules]
+    - if: $APP_NAME != ""
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      <<: *tfp-changes
+    - if: $CI_PIPELINE_SOURCE == "web"
+      <<: *tfp-changes
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      <<: *tfp-changes
+
+apply:registry:
+  extends: [.apply, .registry]
+  needs: [plan:registry]
+  rules:
+    - !reference [.tfp-guard, rules]
+    - if: $APP_NAME != ""
+      when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: never
+    - if: $ENVIRONMENT == "dev" && $CI_PIPELINE_SOURCE == "push"
+      variables:
+        DESTROY_GUARD: "true"
+      <<: *tfp-changes
+    - when: manual
+      <<: *tfp-changes
+
+.service:
+  variables:
+    STACK_DIR: stacks/service
+    STATE_KEY: ${ENVIRONMENT}/services/${APP_NAME}.tfstate
+    TF_VAR_application: ${APP_NAME}
+    TF_VAR_image_tag: ${IMAGE_TAG}
+    EXTRA_APK: ${AWS_CLI_APK}
+
+promote:image:
+  stage: promote
+  image:
+    name: ${TF_IMAGE}
+    entrypoint: [""]
+  inherit:
+    default: false
+  needs: [check-inputs, config]
+  id_tokens:
+    AWS_OIDC_TOKEN:
+      aud: $CI_SERVER_URL
+  environment:
+    name: ${ENVIRONMENT}
+    action: prepare
+  variables:
+    AWS_ROLE_ARN: ${TF_APPLY_ROLE_ARN}
+    CRANE_VERSION: v0.22.1
+    CRANE_SHA256_X86_64: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+    CRANE_SHA256_ARM64: 898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110
+  rules:
+    - !reference [.tfp-guard, rules]
+    - if: $APP_NAME == ""
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      <<: *tfp-changes
+  script:
+    - cd "$CI_PROJECT_DIR/terraform"
+    - set -eu
+    - apk add --no-cache "$YQ_APK" "$AWS_CLI_APK"
+    - TARGET="../infra-base/terraform/environments/${ENVIRONMENT}/environment.yaml"
+    - SOURCE_ENV="$(yq '.release.promote_from // ""' "$TARGET")"
+    - if [ -z "$SOURCE_ENV" ]; then echo "${ENVIRONMENT} has no release.promote_from, nothing to promote"; exit 0; fi
+    - SOURCE="../infra-base/terraform/environments/${SOURCE_ENV}/environment.yaml"
+    - PINNED="$(yq '.image.tag // ""' "../applications/${APP_NAME}/terraform/${ENVIRONMENT}.yaml")"
+    - TAG="${IMAGE_TAG:-$PINNED}"
+    - '[ "$(yq ".release.image_tag_source" "$TARGET")" != config ] || [ "$TAG" = "$PINNED" ] || { echo "IMAGE_TAG ${TAG} does not match image.tag ${PINNED} in applications/${APP_NAME}/terraform/${ENVIRONMENT}.yaml"; exit 1; }'
+    - '[ -n "$TAG" ] || { echo "no image tag: pass IMAGE_TAG or set image.tag in applications/${APP_NAME}/terraform/${ENVIRONMENT}.yaml"; exit 1; }'
+    - REPOSITORY="$(yq '.image.repository' "../applications/${APP_NAME}/terraform/app.yaml")"
+    - SRC_REGION="$(yq '.region.name' "$SOURCE")"
+    - DST_REGION="$(yq '.region.name' "$TARGET")"
+    - SRC="$(yq '.account.id' "$SOURCE").dkr.ecr.${SRC_REGION}.amazonaws.com"
+    - DST="$(yq '.account.id' "$TARGET").dkr.ecr.${DST_REGION}.amazonaws.com"
+    - |
+      case "$(uname -m)" in
+        x86_64) CRANE_ARCH=x86_64; CRANE_SHA256="$CRANE_SHA256_X86_64" ;;
+        aarch64|arm64) CRANE_ARCH=arm64; CRANE_SHA256="$CRANE_SHA256_ARM64" ;;
+        *) echo "no pinned crane build for $(uname -m)"; exit 1 ;;
+      esac
+    - wget -qO /tmp/crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz"
+    - echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c -
+    - tar -xzf /tmp/crane.tar.gz -C /usr/local/bin crane
+    - printf '%s' "$AWS_OIDC_TOKEN" > "${CI_PROJECT_DIR}/.web-identity-token"
+    - export AWS_WEB_IDENTITY_TOKEN_FILE="${CI_PROJECT_DIR}/.web-identity-token" AWS_ROLE_SESSION_NAME="gitlab-${CI_PROJECT_ID}-${CI_JOB_ID}"
+    - aws ecr get-login-password --region "$SRC_REGION" | crane auth login "$SRC" -u AWS --password-stdin
+    - aws ecr get-login-password --region "$DST_REGION" | crane auth login "$DST" -u AWS --password-stdin
+    - DIGEST="$(crane digest "${SRC}/${REPOSITORY}:${TAG}")"
+    - |
+      if CURRENT="$(crane digest "${DST}/${REPOSITORY}:${TAG}" 2>/dev/null)"; then
+        [ "$CURRENT" = "$DIGEST" ] || { echo "${DST}/${REPOSITORY}:${TAG} already holds ${CURRENT}, ${SOURCE_ENV} holds ${DIGEST}"; exit 1; }
+        echo "already promoted: ${REPOSITORY}:${TAG}@${DIGEST}"
+      else
+        crane copy "${SRC}/${REPOSITORY}@${DIGEST}" "${DST}/${REPOSITORY}:${TAG}"
+        echo "promoted ${SOURCE_ENV} -> ${ENVIRONMENT}: ${REPOSITORY}:${TAG}@${DIGEST}"
+      fi
+
+plan:service:
+  extends: [.plan, .service]
+  needs:
+    - check-inputs
+    - config
+    - validate
+    - job: promote:image
+      optional: true
+  rules:
+    - !reference [.tfp-guard, rules]
+    - if: $APP_NAME == ""
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      <<: *tfp-changes
+
+apply:service:
+  extends: [.apply, .service]
+  needs: [plan:service]
+  rules:
+    - !reference [.tfp-guard, rules]
+    - if: $APP_NAME == ""
+      when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: never
+    - if: $ENVIRONMENT == "dev"
+      <<: *tfp-changes
+    - when: manual
+      <<: *tfp-changes

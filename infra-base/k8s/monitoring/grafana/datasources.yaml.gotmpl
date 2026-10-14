@@ -1,0 +1,25 @@
+# ============================================================
+# Grafana — Datasources (provisioned)
+# Merged into the `grafana` release on top of values.yaml.gotmpl.
+# Kept in a dedicated file so datasource wiring evolves independently
+# of the core Grafana runtime config.
+#
+# Correlation Metrics ↔ Logs ↔ Traces:
+#   Prometheus (metrics) — default
+#   Loki       (logs)    — derivedFields → Tempo
+#   Tempo      (traces)  — tracesToLogs (Loki) + tracesToMetrics (Prometheus)
+#   OpenSearch (search)  — needs the plugin + secret mount declared below
+#
+# UIDs are fixed (prometheus/loki/tempo/opensearch) so cross-datasource
+# links resolve deterministically across environments.
+# ============================================================
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+
+# ── Support for the OpenSearch datasource ───────────────────
+# Plugin required by the datasource type above. The password is mapped inline
+# from .Values.secrets.opensearch.password (SOPS) — no secret mount needed.
+plugins:
+  - grafana-opensearch-datasource

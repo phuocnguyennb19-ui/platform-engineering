@@ -1,0 +1,12 @@
+# smoke-test — local overrides. No ECR locally: pull the upstream image by the
+# same digest that applications/smoke-test/k8s/values.yaml pins for the cloud.
+image:
+  registry: ghcr.io
+  repository: stefanprodan/podinfo
+
+# Reachable from the host while `minikube tunnel` runs.
+ingress:
+  hosts:
+    - host: smoke.{{ .Values.ingressDomain }}
+      paths:
+        - { path: /, pathType: Prefix }

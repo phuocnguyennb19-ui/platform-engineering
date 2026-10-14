@@ -1,0 +1,54 @@
+# prod: only the values that differ per environment — layered after ../datasources.yaml.gotmpl
+
+datasources:
+  datasources.yaml:
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://kube-prometheus-stack-prometheus.{{ (.Values.namespace     | default "observability") }}.svc.{{ (.Values.clusterDomain | default "cluster.local") }}:9090
+        isDefault: true
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki-gateway.{{ (.Values.namespace     | default "observability") }}.svc.{{ (.Values.clusterDomain | default "cluster.local") }}
+        jsonData:
+          maxLines: 1000
+          derivedFields:
+            - name: TraceID
+              matcherRegex: '"trace_id":"(\w+)"'
+              url: '$${__value.raw}'
+              datasourceUid: tempo
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        access: proxy
+        url: http://tempo.{{ (.Values.namespace     | default "observability") }}.svc.{{ (.Values.clusterDomain | default "cluster.local") }}:3100
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: loki
+            filterByTraceID: true
+          tracesToMetrics:
+            datasourceUid: prometheus
+          serviceMap:
+            datasourceUid: prometheus
+          nodeGraph:
+            enabled: true
+      - name: OpenSearch
+        type: grafana-opensearch-datasource
+        uid: opensearch
+        access: proxy
+        url: https://opensearch-cluster-master.{{ (.Values.namespace     | default "observability") }}.svc.{{ (.Values.clusterDomain | default "cluster.local") }}:9200
+        basicAuth: true
+        basicAuthUser: admin
+        secureJsonData:
+          # Mapped from SOPS env secret; chart stores it in the datasources Secret.
+          basicAuthPassword: {{ .Values.secrets.opensearch.password | quote }}
+        jsonData:
+          tlsSkipVerify: false   # dev: demo cert · staging/prod: real CA
+          flavor: opensearch
+          database: "logs-*"
+          timeField: "@timestamp"
+          version: "2.11.0"

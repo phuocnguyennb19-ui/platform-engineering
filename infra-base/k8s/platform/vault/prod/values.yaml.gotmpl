@@ -1,0 +1,106 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+global:
+  # dev: in-cluster HTTP (no cert to manage for a throwaway env).
+  # staging/prod: TLS on, backed by the cert-manager Certificate below.
+  tlsDisable: false
+
+injector:
+  enabled: true              # Agent Injector only where apps consume it
+
+server:
+
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 2, memory: 2Gi }
+
+  dataStorage:
+    size: 20Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+
+  # ── HA via integrated Raft storage ────────────────────────
+  ha:
+    replicas: 3
+    raft:
+      config: |
+        ui = true
+        listener "tcp" {
+          address     = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_disable        = 0
+          tls_cert_file      = "/vault/userconfig/vault-tls/tls.crt"
+          tls_key_file       = "/vault/userconfig/vault-tls/tls.key"
+          tls_client_ca_file = "/vault/userconfig/vault-tls/ca.crt"
+        }
+        storage "raft" {
+          path = "/vault/data"
+        {{- /* retry_join lets every peer find the cluster on restart. Without
+               it a multi-replica Raft cluster never forms on its own and each
+               pod has to be joined by hand after `vault operator init`. */}}
+          retry_join {
+            leader_api_addr = "https://vault-0.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/vault-tls/ca.crt"
+            leader_client_cert_file = "/vault/userconfig/vault-tls/tls.crt"
+            leader_client_key_file  = "/vault/userconfig/vault-tls/tls.key"
+          }
+          retry_join {
+            leader_api_addr = "https://vault-1.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/vault-tls/ca.crt"
+            leader_client_cert_file = "/vault/userconfig/vault-tls/tls.crt"
+            leader_client_key_file  = "/vault/userconfig/vault-tls/tls.key"
+          }
+          retry_join {
+            leader_api_addr = "https://vault-2.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/vault-tls/ca.crt"
+            leader_client_cert_file = "/vault/userconfig/vault-tls/tls.crt"
+            leader_client_key_file  = "/vault/userconfig/vault-tls/tls.key"
+          }
+        }
+        {{- if ne (env "VAULT_KMS_KEY_ID"  | default "") "" }}
+        # ── Auto-unseal via AWS KMS (prod) ──
+        # Key id from VAULT_KMS_KEY_ID; credentials via the IRSA role below.
+        seal "awskms" {
+          region     = "{{ (env "AWS_REGION"        | default "ap-southeast-1") }}"
+          kms_key_id = "{{ (env "VAULT_KMS_KEY_ID"  | default "") }}"
+        }
+        {{- else }}
+        # ⚠ VAULT_KMS_KEY_ID not set — no seal stanza emitted. Vault will start
+        #   SEALED and must be unsealed manually after every restart. Export
+        #   VAULT_KMS_KEY_ID (and AWS_ACCOUNT_ID for the IRSA role) to enable
+        #   auto-unseal. See README.
+        {{- end }}
+        service_registration "kubernetes" {}
+        telemetry {
+          prometheus_retention_time = "30s"
+          disable_hostname = true
+        }
+  # ── TLS material from cert-manager (vault/manifests/certificate.yaml) ──
+  # `type: secret` volumes are mounted at /vault/userconfig/<name>/.
+  extraVolumes:
+    - type: secret
+      name: vault-tls
+  extraEnvironmentVars:
+    VAULT_ADDR:    https://127.0.0.1:8200
+    VAULT_CACERT:  /vault/userconfig/vault-tls/ca.crt
+    VAULT_TLSCERT: /vault/userconfig/vault-tls/tls.crt
+    VAULT_TLSKEY:  /vault/userconfig/vault-tls/tls.key
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ "{{ template \"vault.name\" . }}" }}
+              component: server
+  serviceAccount:
+    create: true
+    {{- if (env "AWS_ACCOUNT_ID"   | default "") }}
+    annotations:
+      # IRSA role granting kms:Encrypt/Decrypt/DescribeKey on the unseal key.
+      eks.amazonaws.com/role-arn: arn:aws:iam::{{ (env "AWS_ACCOUNT_ID"   | default "") }}:role/vault-unseal-prod
+    {{- else }}
+    # ⚠ AWS_ACCOUNT_ID not set — no IRSA annotation emitted. Auto-unseal needs
+    #   it; a literal <ACCOUNT_ID> placeholder would just fail at AssumeRole.
+    {{- end }}

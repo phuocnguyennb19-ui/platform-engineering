@@ -1,0 +1,7 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+# Scheduled daily backup.
+schedules:
+  daily-full:
+    template:
+      ttl: 720h0m0s

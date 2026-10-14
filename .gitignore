@@ -1,0 +1,69 @@
+# Decrypted secrets — never commit (SOPS-encrypted secrets.enc.yaml ARE committed)
+*.dec
+*.dec.yaml
+*.dec.yml
+*.decrypted
+*.plain.yaml
+*-decrypted.yaml
+
+# Kube / cloud credentials
+kubeconfig
+*.kubeconfig
+kubeconfig*.yaml
+.kube/
+*.pem
+*.key
+!**/templates/**
+credentials
+.aws/
+.azure/
+gcp-*.json
+*-sa.json
+
+# SOPS / age private keys
+keys.txt
+*.agekey
+age-key*.txt
+.sops/**/keys*
+
+# .env plaintext
+.env
+.env.local
+.env.*.local
+*.env.plain
+
+# Helm / Helmfile artifacts
+*.tgz
+dist/
+k8s/reports/
+k8s/charts/**/charts/
+**/Chart.lock
+.helmfile/
+helmfile-*.yaml.build
+
+# Terraform — stacks commit their lock file, the module library does not
+.terraform/
+terraform/modules/**/.terraform.lock.hcl
+terraform/examples/**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+tfplan
+tfplan.json
+tfplan-*
+*.tfplan
+*.tfplan.json
+plan.txt
+*_override.tf
+.terraformrc
+terraform.rc
+crash.log
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.claude/settings.local.json

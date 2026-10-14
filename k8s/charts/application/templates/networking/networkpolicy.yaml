@@ -1,0 +1,130 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+Applies to every pod of the release (app + workers + cronjobs) — network posture
+is not per-component.
+
+⚠ NetworkPolicy semantics: once an ingress rule with a `from` list exists, ONLY
+  those peers are allowed. Same-namespace traffic is NOT implicitly permitted,
+  so a service-to-service call inside the same namespace is dropped unless
+  `allowSameNamespace` (default true) adds the `podSelector: {}` peer.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- if .Values.networkPolicy.podSelector }}
+      {{- toYaml .Values.networkPolicy.podSelector | nindent 6 }}
+      {{- else }}
+      {{- include "application.selectorLabels" . | nindent 6 }}
+      {{- end }}
+  policyTypes:
+    {{- if .Values.networkPolicy.policyTypes }}
+    {{- toYaml .Values.networkPolicy.policyTypes | nindent 4 }}
+    {{- else }}
+    {{- if .Values.networkPolicy.ingress.enabled }}
+    - Ingress
+    {{- end }}
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
+    {{- end }}
+
+  {{- $wantIngress := or (has "Ingress" (.Values.networkPolicy.policyTypes | default list)) (and (not .Values.networkPolicy.policyTypes) .Values.networkPolicy.ingress.enabled) }}
+  {{- if $wantIngress }}
+  {{- $ing := .Values.networkPolicy.ingress }}
+  ingress:
+    {{- /* Default rule: the workload's own ports, from the allowed peers. */}}
+    - ports:
+        {{- if $ing.ports }}
+        {{- toYaml $ing.ports | nindent 8 }}
+        {{- else }}
+        - protocol: TCP
+          port: {{ .Values.service.targetPort | default .Values.service.port }}
+        {{- range .Values.extraPorts }}
+        - protocol: {{ .protocol | default "TCP" }}
+          port: {{ .containerPort }}
+        {{- end }}
+        {{- end }}
+      {{- $peers := list }}
+      {{- if $ing.allowSameNamespace }}
+      {{- $peers = append $peers (dict "podSelector" dict) }}
+      {{- end }}
+      {{- with $ing.fromIngressNamespace }}
+      {{- $peers = append $peers (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" .))) }}
+      {{- end }}
+      {{- range $ns := ($ing.fromNamespaces | default list) }}
+      {{- $peers = append $peers (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $ns))) }}
+      {{- end }}
+      {{- range $p := ($ing.from | default list) }}
+      {{- $peers = append $peers $p }}
+      {{- end }}
+      {{- with $peers }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with $ing.customRules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+
+  {{- $wantEgress := or (has "Egress" (.Values.networkPolicy.policyTypes | default list)) (and (not .Values.networkPolicy.policyTypes) .Values.networkPolicy.egress.enabled) }}
+  {{- if $wantEgress }}
+  {{- $eg := .Values.networkPolicy.egress }}
+  egress:
+    {{- /* DNS first — without it every hostname lookup fails and the symptom
+           looks like an application bug, not a policy one. */}}
+    {{- if $eg.dns.enabled }}
+    - to:
+        {{- if $eg.dns.namespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml $eg.dns.namespaceSelector | nindent 12 }}
+          {{- with $eg.dns.podSelector }}
+          podSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        {{- end }}
+      ports:
+        - protocol: UDP
+          port: {{ $eg.dns.port | default 53 }}
+        - protocol: TCP
+          port: {{ $eg.dns.port | default 53 }}
+    {{- end }}
+    {{- if $eg.allowSameNamespace }}
+    - to:
+        - podSelector: {}
+    {{- end }}
+    {{- range $ns := ($eg.toNamespaces | default list) }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ns.namespace }}
+      {{- with $ns.ports }}
+      ports:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- if $eg.allowExternalHTTPS }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- toYaml ($eg.externalExcept | default (list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "169.254.169.254/32")) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- with $eg.customRules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- end }}

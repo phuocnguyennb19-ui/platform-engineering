@@ -1,0 +1,6 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+settings:
+  interruptionQueue: karpenter-staging         # ← SQS queue name
+
+replicas: 1

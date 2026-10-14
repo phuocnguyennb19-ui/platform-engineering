@@ -1,0 +1,32 @@
+# ============================================================
+# argocd — GitOps controller. Its Application/AppProject manifests live in argocd/, applied by the root-app — NOT by helm.
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f argocd/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../infra-base/k8s/env-values/environments.yaml
+  - ../../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: argocd
+    namespace: infra
+    createNamespace: true
+    chart: argo/argo-cd
+    version: 7.8.0
+    missingFileHandler: Warn
+    labels: { name: argocd, layer: platform, tier: infra, component: delivery, env: "{{ $env }}" }
+    values:
+      - ../../../infra-base/k8s/platform/argocd/values.yaml.gotmpl
+      - ../../../infra-base/k8s/platform/argocd/{{ .Environment.Name }}/values.yaml.gotmpl

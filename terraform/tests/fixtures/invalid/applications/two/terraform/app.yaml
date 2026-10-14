@@ -1,0 +1,8 @@
+application:
+  name: two
+
+runtime:
+  type: lambda
+
+image:
+  repository: shared

@@ -1,0 +1,4 @@
+bucket: ""
+region: ""
+encrypt: true
+use_lockfile: true

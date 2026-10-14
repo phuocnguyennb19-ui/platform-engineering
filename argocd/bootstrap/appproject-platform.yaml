@@ -1,0 +1,50 @@
+# ============================================================
+# AppProject "platform" — a guardrail for the app-tier Applications.
+# Restricts: pull only from our own repo, deploy only to allowed clusters/ns,
+# create only the required resource kinds. (Least-privilege for CD.)
+# ============================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: infra
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: App-tier services (charts/application chart) managed by Argo CD
+
+  # Allow this source only (chart + values both live in the git repo).
+  sourceRepos:
+    - https://gitlab.com/myorg/helm-project-v3.git
+
+  # Deploy only into the app-tier namespaces on the in-cluster.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: dev
+    - server: https://kubernetes.default.svc
+      namespace: staging
+    - server: https://kubernetes.default.svc
+      namespace: prod
+
+  # App-tier may NOT create cluster-scoped resources (blocks escalation).
+  clusterResourceWhitelist: []
+
+  # Only the namespaced resource kinds the charts/application chart produces.
+  namespaceResourceWhitelist:
+    - { group: "", kind: Service }
+    - { group: "", kind: ConfigMap }
+    - { group: "", kind: Secret }
+    - { group: "", kind: ServiceAccount }
+    - { group: apps, kind: Deployment }
+    - { group: apps, kind: DaemonSet }
+    - { group: batch, kind: CronJob }
+    - { group: autoscaling, kind: HorizontalPodAutoscaler }
+    - { group: policy, kind: PodDisruptionBudget }
+    - { group: networking.k8s.io, kind: Ingress }
+    - { group: networking.k8s.io, kind: NetworkPolicy }
+    - { group: monitoring.coreos.com, kind: ServiceMonitor }
+    - { group: monitoring.coreos.com, kind: PrometheusRule }
+
+  # Sync windows / roles can be added later if finer RBAC is needed.
+  orphanedResources:
+    warn: true

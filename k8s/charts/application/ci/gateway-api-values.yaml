@@ -1,0 +1,30 @@
+# Gateway API instead of Ingress, plus a gRPC surface.
+image:
+  repository: edge-api
+  tag: "2.1.0"
+
+extraPorts:
+  - { name: grpc, containerPort: 9000, protocol: TCP }
+
+probes:
+  readiness: { httpGet: { path: /readyz, port: http } }
+
+httpRoute:
+  enabled: true
+  parentRefs:
+    - { name: platform, namespace: infra, sectionName: https }
+  hostnames:
+    - api.example.com
+
+grpcRoute:
+  enabled: true
+  parentRefs:
+    - { name: platform, namespace: infra, sectionName: https }
+  hostnames:
+    - grpc.example.com
+  rules:
+    - matches:
+        - method: { service: my.Service }
+      backendRefs:
+        - name: '{{ include "application.fullname" . }}'
+          port: 9000

@@ -1,0 +1,32 @@
+# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+deploymentMode: SingleBinary
+# ── SingleBinary mode (dev/staging) ─────────────────────────
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 20Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+# Disable scalable components in SingleBinary mode.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+# nginx gateway — stable in-cluster entrypoint used by Grafana/Alloy.
+gateway:
+  replicas: 1
+lokiCanary:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false

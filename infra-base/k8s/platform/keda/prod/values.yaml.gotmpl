@@ -1,0 +1,26 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+# ── Operator ────────────────────────────────────────────────
+operator:
+  replicaCount: 2
+
+# ── Metrics API server (feeds external.metrics.k8s.io) ──────
+metricsServer:
+  replicaCount: 2
+
+# ── HA scheduling (prod) ────────────────────────────────────
+podDisruptionBudget:
+  operator:
+    minAvailable: 1
+  metricServer:
+    minAvailable: 1
+affinity:
+  operator:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app: keda-operator

@@ -1,0 +1,89 @@
+# ============================================================
+# Kong Gateway — API gateway + Gateway API controller (DB-less)
+# Chart: kong/kong · ns `infra`
+#
+# Role: north-south API gateway for services that need gateway features
+# (auth, rate-limit, transformations, mTLS) beyond plain ingress-nginx.
+# Implements the Gateway API (GatewayClass `kong`) AND classic Ingress
+# (ingressClassName `kong`) so teams can adopt either.
+#
+# DB-less + declarative: no PostgreSQL dependency; config comes from CRDs
+# (KongPlugin, KongConsumer, HTTPRoute) reconciled by the built-in controller.
+# This keeps Kong stateless and GitOps-friendly.
+#
+# What lives where:
+#   values.yaml.gotmpl  → proxy/controller, Gateway API, TLS, sizing
+#   manifests/plugins.yaml → declarative plugins as KongClusterPlugin CRs.
+#                         ⚠ kubectl-applied, NOT part of the release:
+#                           kubectl apply -f kong/manifests/plugins.yaml
+#                         Until it is applied the `prometheus` plugin is off, so
+#                         serviceMonitor below scrapes base metrics only — no
+#                         per-route request/latency/bandwidth series.
+#   Secret (SOPS)       → plugin credentials (JWT/keys) referenced by CRs
+# ============================================================
+
+fullnameOverride: kong
+
+# ── Controller (ingress + Gateway API reconciler) ───────────
+ingressController:
+  enabled: true
+  ingressClass: kong
+  gatewayDiscovery:
+    enabled: false
+  env:
+    # Enable Gateway API (HTTPRoute/Gateway) alongside Ingress.
+    feature_gates: "GatewayAlpha=true"
+    publish_service: infra/kong-proxy
+
+# ── DB-less ─────────────────────────────────────────────────
+env:
+  database: "off"
+  router_flavor: expressions
+
+# ── Proxy (data plane) ──────────────────────────────────────
+proxy:
+  tls:
+    enabled: true
+
+autoscaling:
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  minAvailable: 1
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: kong
+
+# ── Hardening ───────────────────────────────────────────────
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  seccompProfile: { type: RuntimeDefault }
+  capabilities: { drop: [ ALL ] }
+
+# ── Admin API stays cluster-internal (no public control plane) ──
+admin:
+  enabled: true
+  type: ClusterIP
+  http:
+    enabled: false
+  tls:
+    enabled: true
+
+manager:
+  enabled: false                       # Kong Manager UI off (use CRDs/git)
+
+# ── Metrics (Prometheus plugin exposes /metrics) ────────────
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack

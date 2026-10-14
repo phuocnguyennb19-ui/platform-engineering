@@ -1,0 +1,560 @@
+# =============================================================================
+# charts/application — generic production application chart
+#
+# CONTRACT
+#   • Every knob below is OPTIONAL unless marked REQUIRED. Anything left at its
+#     default renders nothing, or renders the hardened default.
+#   • Root-level pod settings are DEFAULTS. `workers[]` and `cronjobs[]` inherit
+#     all of them and override only what they declare (maps deep-merge, lists
+#     replace). You never repeat securityContext, volumes, env or scheduling.
+#   • Defaults are production-first: non-root, read-only rootfs, no capabilities,
+#     no service-account token, seccomp RuntimeDefault. Relaxing is explicit.
+#
+# REQUIRED to deploy anything real:
+#   image.repository, image.tag (or image.digest), probes.readiness, resources
+# =============================================================================
+
+# ── Identity ────────────────────────────────────────────────────────────────
+nameOverride: ""
+fullnameOverride: ""
+namespaceOverride: ""          # default: .Release.Namespace
+
+# Applied to EVERY object the chart creates.
+commonLabels: {}
+commonAnnotations: {}
+
+# ── Global (shared with subcharts / set once per environment) ───────────────
+global:
+  imageRegistry: ""            # e.g. harbor.prod.example.com — prefixed to every image
+  podSecurityContext: {}       # platform-wide floor, merged first
+  securityContext: {}
+
+# ── Image ───────────────────────────────────────────────────────────────────
+# The ONLY value with no usable default. Everything else in this file is
+# optional, which is safe precisely because this one is not: a values file that
+# fails to load can no longer produce a running-but-wrong release.
+#
+# `repository` was `nginx` (the Helm scaffold default). That turned every
+# mis-layered or mistyped values path into a green deploy of an nginx pod under
+# the service's name and Ingress. It is now empty, so the render fails with
+# "image.repository is required" instead.
+#
+# There is deliberately NO `latest` fallback either: an unresolvable tag fails
+# the render rather than shipping a floating image. Order: digest > tag > AppVersion.
+image:
+  registry: ""                 # overrides global.imageRegistry for this image
+  repository: ""               # REQUIRED — render fails if unset
+  tag: ""                      # REQUIRED unless digest — falls back to Chart.AppVersion
+  digest: ""                   # e.g. sha256:abc... — wins over tag
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# - name: harbor-pull
+
+# ── Workload shape ──────────────────────────────────────────────────────────
+# One knob picks the controller. Everything else in this file applies to all
+# three; StatefulSet additionally gets a headless Service and volumeClaimTemplates.
+workload:
+  kind: Deployment             # Deployment | StatefulSet | DaemonSet
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  minReadySeconds: 0
+
+  strategy:
+    type: RollingUpdate        # RollingUpdate | Recreate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0        # never drop below the desired replica count
+
+  statefulset:
+    serviceName: ""            # default: <fullname>-headless
+    podManagementPolicy: OrderedReady   # OrderedReady | Parallel
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate: {}        # e.g. { partition: 0 }
+    persistentVolumeClaimRetentionPolicy: {}
+    # whenDeleted: Retain
+    # whenScaled: Retain
+    volumeClaimTemplates: []
+    # - metadata: { name: data }
+    #   spec:
+    #     accessModes: [ReadWriteOnce]
+    #     storageClassName: gp3
+    #     resources: { requests: { storage: 20Gi } }
+
+  daemonset:
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 1
+
+replicaCount: 2                # ignored when autoscaling/keda is enabled
+
+# ── ServiceAccount ──────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false   # only true if the app calls the API server
+  annotations: {}
+  # eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/<role>   # IRSA
+  imagePullSecrets: []
+  secrets: []
+
+# ── RBAC (off — least privilege) ────────────────────────────────────────────
+rbac:
+  create: false
+  rules: []                    # namespaced Role — prefer this
+  # - apiGroups: [""]
+  #   resources: [configmaps]
+  #   verbs: [get, list, watch]
+  clusterRules: []             # ClusterRole — cluster-wide blast radius, justify it
+
+# ── Security (production-first defaults) ────────────────────────────────────
+# Merge order, later wins:
+#   global.* → securityDefaults.* → podSecurityContext/securityContext → per-component
+securityDefaults:
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    privileged: false
+    capabilities:
+      drop: [ALL]
+
+# Per-service overrides — set only the keys that must differ.
+podSecurityContext: {}
+securityContext: {}
+
+# ── Entrypoint ──────────────────────────────────────────────────────────────
+command: []
+args: []
+
+# ── Environment ─────────────────────────────────────────────────────────────
+# `env` and `secretEnv` are MAPS, inherited by every container (app, workers,
+# cronjobs, initContainers, sidecars). Values pass through `tpl`.
+env: {}
+#   LOG_LEVEL: info
+#   APP_ENV: production
+
+# ⚠ secretEnv renders INLINE as `value:` — readable in the pod spec, in etcd and
+#   in the Helm release. Use it for low-value config only. Real credentials go
+#   through externalSecret / extraEnvFrom / envRaw+secretKeyRef.
+secretEnv: {}
+
+# Verbatim env entries — the only way to express valueFrom.
+envRaw: []
+# - name: POD_IP
+#   valueFrom: { fieldRef: { fieldPath: status.podIP } }
+# - name: DB_PASSWORD
+#   valueFrom: { secretKeyRef: { name: app-db, key: password } }
+
+# Whole-Secret / ConfigMap injection — the secure path.
+extraEnvFrom: []
+# - secretRef: { name: be-user }
+# - configMapRef: { name: shared-config }
+
+# ── Ports ───────────────────────────────────────────────────────────────────
+# `http` is created automatically from service.targetPort. List extra ones here;
+# they land on the container AND on the Service unless exposeOnService: false.
+extraPorts: []
+# - { name: metrics, containerPort: 9090, protocol: TCP }
+# - { name: grpc,    containerPort: 9000, protocol: TCP }
+
+# ── Service ─────────────────────────────────────────────────────────────────
+service:
+  enabled: true
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  nodePort: ""
+  appProtocol: ""
+  annotations: {}
+  sessionAffinity: ""
+  sessionAffinityConfig: {}
+  loadBalancerClass: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: ""    # Local preserves client source IP on LB/NodePort
+  internalTrafficPolicy: ""
+  ipFamilyPolicy: ""
+  publishNotReadyAddresses: false
+  extraPorts: []               # raw ServicePort entries
+  headless:                    # always created for StatefulSet
+    enabled: false
+    publishNotReadyAddresses: true
+    annotations: {}
+
+# ── Health probes ───────────────────────────────────────────────────────────
+# null = not rendered. A non-null probe MUST carry a handler — the chart fails
+# the render otherwise rather than letting the API server reject the pod.
+# In production readiness is effectively mandatory: with maxUnavailable: 0 and
+# no readiness gate, a rollout sends traffic to cold pods.
+probes:
+  startup: ~
+  # startup:  { httpGet: { path: /readyz,  port: http }, failureThreshold: 30, periodSeconds: 5 }
+  liveness: ~
+  # liveness: { httpGet: { path: /healthz, port: http }, periodSeconds: 15, timeoutSeconds: 3, failureThreshold: 3 }
+  readiness: ~
+  # readiness:{ httpGet: { path: /readyz,  port: http }, periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 3 }
+
+# ── Resources ───────────────────────────────────────────────────────────────
+# CPU limits are intentionally absent: they cause throttling on latency-
+# sensitive services. Memory limits are present because memory is not
+# compressible. Matches kyverno require-requests-limits.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# ── Lifecycle ───────────────────────────────────────────────────────────────
+terminationGracePeriodSeconds: 30
+lifecycle: {}
+# preStop:
+#   exec: { command: ["/bin/sh", "-c", "sleep 5"] }   # let endpoints drain first
+
+# ── Autoscaling ─────────────────────────────────────────────────────────────
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80
+  customMetrics: []
+  # - type: Pods
+  #   pods: { metric: { name: http_requests_per_second }, target: { type: AverageValue, averageValue: "100" } }
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # 5m — stops replica flapping
+      policies:
+        - { type: Percent, value: 50, periodSeconds: 60 }
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - { type: Percent, value: 100, periodSeconds: 30 }
+        - { type: Pods, value: 4, periodSeconds: 30 }
+      selectPolicy: Max
+
+# KEDA — event-driven scaling of the APP workload.
+# ⚠ For queue consumers use workers[].keda instead: that targets the worker
+#   Deployment. A root-level ScaledObject scales the HTTP surface, not the consumer.
+keda:
+  enabled: false
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 30
+  cooldownPeriod: 300
+  idleReplicaCount: ~          # set 0 for scale-to-zero
+  fallback: {}
+  advanced: {}
+  triggers: []
+
+verticalPodAutoscaler:
+  enabled: false
+  updateMode: "Off"            # Off = recommendations only; Auto fights the HPA
+  resourcePolicy: {}
+
+# ── Availability ────────────────────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: false
+  minAvailable: ""             # set ONE of these, never both
+  maxUnavailable: ""
+  unhealthyPodEvictionPolicy: ""   # AlwaysAllow unblocks drains on broken pods
+
+topologySpreadConstraints: []
+# - maxSkew: 1
+#   topologyKey: topology.kubernetes.io/zone
+#   whenUnsatisfiable: ScheduleAnyway
+# - maxSkew: 1
+#   topologyKey: kubernetes.io/hostname
+#   whenUnsatisfiable: DoNotSchedule
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+runtimeClassName: ""
+schedulerName: ""
+
+# ── Pod-spec escape hatches (default off, all optional) ─────────────────────
+hostNetwork: false
+hostPID: false
+hostIPC: false
+shareProcessNamespace: false
+hostAliases: []
+dnsPolicy: ""
+dnsConfig: {}
+podLabels: {}
+podAnnotations: {}
+
+# ── Volumes ─────────────────────────────────────────────────────────────────
+# readOnlyRootFilesystem: true means /tmp must be a volume — most apps need this.
+extraVolumes: []
+# - name: tmp
+#   emptyDir: { medium: Memory, sizeLimit: 128Mi }
+extraVolumeMounts: []
+# - { name: tmp, mountPath: /tmp }
+
+# ── initContainers ──────────────────────────────────────────────────────────
+# Omit `image` to reuse the application image and tag (the usual case for
+# migrations, so the schema always matches the binary being deployed).
+initContainers: []
+# - name: migrate
+#   command: ["./app"]
+#   args: ["migrate", "--up"]
+#   resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 256Mi } }
+#   restartPolicy: Always      # k8s >= 1.29 → native sidecar
+
+# ── Sidecars ────────────────────────────────────────────────────────────────
+extraContainers: []
+# - name: metrics-exporter
+#   image: prom/statsd-exporter:v0.28.0
+#   ports: [ { name: sidecar-metrics, containerPort: 9102 } ]
+#   resources: { requests: { cpu: 25m, memory: 32Mi }, limits: { memory: 64Mi } }
+#   inheritEnv: false          # opt out of the shared env block
+
+# ── Workers ─────────────────────────────────────────────────────────────────
+# A LIST — every entry becomes its own Deployment named <fullname>-<name>, with
+# its OWN component label, so the app Service, PDB and ServiceMonitor never
+# capture worker pods. Each worker inherits every root setting above and
+# overrides only what it declares (probes excepted — see below).
+#
+# ⚠ LISTS REPLACE, THEY DO NOT MERGE. If two layered values files both set
+#   `workers:`, the later file wins completely and the earlier workers vanish
+#   without a warning. Declare all workers for a service in ONE file.
+#
+# ⚠ `name` must be unique, and must stay unique after truncation to 63 chars
+#   (release name + chart name + worker name). The chart fails the render on a
+#   collision rather than losing a worker silently.
+#
+# ⚠ `probes` are NOT inherited from the root: the app's probes target `port:
+#   http`, which a worker does not have. Declare worker probes explicitly.
+#
+# Use `enabled: false` to keep a definition in git without deploying it.
+workers: []
+# - name: consumer
+#   enabled: true
+#   replicaCount: 2
+#   command: ["./app"]
+#   args: ["worker", "--queue=default"]
+#   env: { WORKER_ROLE: consumer }        # merged over the root env
+#   resources: { requests: { cpu: 200m, memory: 256Mi }, limits: { memory: 512Mi } }
+#   probes:
+#     liveness: { exec: { command: ["/bin/sh","-c","pgrep -f worker"] }, periodSeconds: 30 }
+#   extraPorts: [ { name: metrics, containerPort: 9090 } ]
+#   service:        { enabled: true }     # needed to scrape the worker
+#   serviceMonitor: { enabled: true, port: metrics }
+#   podDisruptionBudget: { enabled: true, maxUnavailable: 1 }
+#   keda:                                  # scales THIS worker, not the app
+#     enabled: true
+#     minReplicaCount: 2
+#     maxReplicaCount: 20
+#     triggers:
+#       - type: kafka
+#         metadata:
+#           bootstrapServers: kafka.database.svc:9092
+#           consumerGroup: my-group
+#           topic: my-topic
+#           lagThreshold: "50"
+
+# ── CronJobs ────────────────────────────────────────────────────────────────
+cronjobDefaults:
+  timeZone: "Asia/Ho_Chi_Minh" # spec.timeZone — the schedule is UTC without it,
+                               # a TZ env var does NOT move the schedule
+  concurrencyPolicy: Forbid
+  backoffLimit: 2
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  restartPolicy: Never
+
+# A LIST — every entry becomes its own CronJob named <fullname>-<name>.
+# Same rules as workers: lists replace rather than merge, and `name` must be
+# unique after truncation to 52 chars (shorter than a worker's 63 so the
+# generated Job and Pod name suffixes still fit inside the 63-char limit).
+cronjobs: []
+# - name: cleanup
+#   enabled: true
+#   schedule: "0 2 * * *"       # 02:00 in cronjobDefaults.timeZone
+#   command: ["./app"]
+#   args: ["cleanup"]
+#   env: { JOB_TYPE: cleanup }
+#   resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 256Mi } }
+
+# ── Config & Secrets ────────────────────────────────────────────────────────
+configmap:
+  enabled: false
+  nameOverride: ""
+  annotations: {}
+  data: {}                     # values pass through tpl
+  binaryData: {}
+
+extraConfigMaps: {}
+# nginx-conf:
+#   nginx.conf: |
+#     server { listen 8080; }
+
+# ⚠ Prefer externalSecret. This one lives in the Helm release and in git.
+secret:
+  enabled: false
+  nameOverride: ""
+  type: Opaque
+  annotations: {}
+  data: {}                     # base64-encoded
+  stringData: {}               # plaintext, passes through tpl
+
+# External Secrets Operator — the recommended path for credentials.
+externalSecret:
+  enabled: false
+  apiVersion: external-secrets.io/v1beta1
+  refreshInterval: 1h
+  injectEnvFrom: true          # auto-add the resulting Secret to envFrom
+  secretStoreRef:
+    name: ""                   # REQUIRED when enabled
+    kind: ClusterSecretStore
+  target:
+    name: ""                   # default: <fullname>
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    template: {}
+  data: []
+  # - secretKey: DB_PASSWORD
+  #   remoteRef: { key: prod/app, property: db_password }
+  dataFrom: []
+  # - extract: { key: prod/app }
+
+# Stakater Reloader — restarts pods when a Secret/ConfigMap they consume changes.
+# Chart-owned config already triggers a rollout via checksum; this covers the
+# externally-managed ones (ESO rotation, SealedSecrets).
+reloader:
+  enabled: false
+  mode: auto                   # auto | explicit
+  configmaps: []               # explicit mode: names to watch
+  secrets: []
+
+# ── North-south routing ─────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}              # values pass through tpl
+  defaultBackend: {}
+  hosts: []
+  # - host: app.example.com
+  #   paths: [ { path: /, pathType: Prefix } ]
+  tls: []
+  # - secretName: app-tls
+  #   hosts: [ app.example.com ]
+
+httpRoute:                     # Gateway API — mutually exclusive with ingress
+  enabled: false
+  apiVersion: gateway.networking.k8s.io/v1
+  annotations: {}
+  parentRefs: []
+  # - { name: platform, namespace: infra, sectionName: https }
+  hostnames: []
+  timeouts: {}
+  rules: []                    # empty = "/" → service.port
+
+grpcRoute:
+  enabled: false
+  apiVersion: gateway.networking.k8s.io/v1
+  annotations: {}
+  parentRefs: []
+  hostnames: []
+  rules: []
+
+# ── NetworkPolicy ───────────────────────────────────────────────────────────
+# ⚠ Once an ingress rule has a `from` list, ONLY those peers are allowed —
+#   same-namespace traffic is not implicit. allowSameNamespace keeps
+#   service-to-service calls inside the namespace working.
+networkPolicy:
+  enabled: false
+  podSelector: {}              # default: all pods of this release
+  policyTypes: []              # default: derived from ingress/egress .enabled
+  ingress:
+    enabled: true
+    allowSameNamespace: true
+    fromIngressNamespace: ""   # e.g. infra (where the ingress controller runs)
+    fromNamespaces: []         # e.g. [observability] for Prometheus scraping
+    from: []                   # raw NetworkPolicyPeer entries
+    ports: []                  # default: service.targetPort + every extraPorts
+    customRules: []
+  egress:
+    enabled: false
+    allowSameNamespace: true
+    dns:
+      enabled: true            # without DNS every hostname lookup fails
+      namespaceSelector: {}    # default: kube-system
+      podSelector: {}
+      port: 53
+    toNamespaces: []
+    # - namespace: database
+    #   ports: [ { protocol: TCP, port: 5432 }, { protocol: TCP, port: 6379 } ]
+    allowExternalHTTPS: false
+    externalExcept: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254/32]
+    customRules: []
+
+# ── Observability ───────────────────────────────────────────────────────────
+serviceMonitor:
+  enabled: false
+  namespace: ""                # default: release namespace
+  port: metrics                # must match an entry in extraPorts
+  path: /metrics
+  interval: 30s
+  scrapeTimeout: 10s
+  scheme: ""
+  honorLabels: false
+  tlsConfig: {}
+  bearerTokenSecret: {}
+  labels:
+    release: kube-prometheus-stack   # so the Prometheus Operator selects it
+  relabelings: []
+  metricRelabelings: []
+  extraEndpoints: []
+
+prometheusRule:
+  enabled: false
+  labels:
+    release: kube-prometheus-stack
+  # Baseline alerts every service gets for free. Disable individually or ignore
+  # them entirely and supply `groups`.
+  defaultRules:
+    enabled: true
+    podCrashLooping: { enabled: true, threshold: 3, for: 5m,  severity: critical }
+    podNotReady:     { enabled: true, for: 15m, severity: warning }
+    highMemoryUsage: { enabled: true, threshold: 0.90, for: 10m, severity: warning }
+    highErrorRate:
+      enabled: false           # needs the app to export this metric
+      metric: http_requests_total
+      errorSelector: 'code=~"5.."'
+      threshold: 0.05
+      for: 10m
+      severity: critical
+  groups: []                   # custom rule groups, appended
+
+# ── helm test ───────────────────────────────────────────────────────────────
+tests:
+  enabled: true
+  image: busybox:1.37.0
+  path: /
+  timeoutSeconds: 10
+
+# ── Raw manifests shipped with the release ──────────────────────────────────
+# Rendered through tpl. The supported way to add what the chart does not model,
+# without stepping outside GitOps.
+extraObjects: []
+# - apiVersion: v1
+#   kind: ConfigMap
+#   metadata:
+#     name: "{{ include \"application.fullname\" . }}-extra"
+#   data: { hello: world }

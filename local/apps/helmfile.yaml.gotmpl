@@ -1,0 +1,33 @@
+# ============================================================
+# Local app releases — one charts/application release per application that has
+# a local environment folder: applications/<app>/k8s/local/values.yaml.
+# Nothing to register here: adding that file is what puts an app on the laptop.
+#   helmfile -e local -l name=<app> sync        (cd local)
+#   helmfile -e local -f apps/helmfile.yaml.gotmpl -l name=<app> template
+#
+# Values, in order — the layers the Argo CD ApplicationSet uses in the cloud, with
+# local/values in place of infra-base/k8s/env-values/<env>:
+#   infra-base/k8s/env-values/app-values.yaml.gotmpl          shared app defaults (security, netpol)
+#   local/values/app-values.yaml                   local environment layer
+#   applications/<app>/k8s/values.yaml             the app, as deployed in the cloud
+#   applications/<app>/k8s/local/values.yaml       the app's local environment
+# ============================================================
+bases:
+  - ../defaults.yaml.gotmpl
+
+---
+
+releases:
+{{- range $app := readDirEntries "../../applications" }}
+{{- if and $app.IsDir (isFile (printf "../../applications/%s/k8s/local/values.yaml" $app.Name)) }}
+  - name: {{ $app.Name }}
+    namespace: {{ $.Values.namespace }}
+    chart: ../../k8s/charts/application
+    labels: { name: {{ $app.Name }}, layer: app }
+    values:
+      - ../../infra-base/k8s/env-values/app-values.yaml.gotmpl
+      - ../values/app-values.yaml
+      - ../../applications/{{ $app.Name }}/k8s/values.yaml
+      - ../../applications/{{ $app.Name }}/k8s/local/values.yaml
+{{- end }}
+{{- end }}

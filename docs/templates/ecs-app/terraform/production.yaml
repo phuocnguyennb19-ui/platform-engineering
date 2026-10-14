@@ -1,0 +1,24 @@
+resources:
+  cpu: 256
+  memory: 512
+
+deployment:
+  replicas: 2
+  # autoscaling:
+  #   min: 1
+  #   max: 3
+
+image:
+  tag: "REPLACE_WITH_IMAGE_TAG"
+
+# environment:
+#   LOG_LEVEL: info
+
+# secrets:
+#   DB_PASSWORD: arn:aws:secretsmanager:ap-southeast-1:<account>:secret:<name>
+
+# container:
+#   port: 8080
+#   health_check_path: /healthz
+# network:
+#   host: __APP__.example.com

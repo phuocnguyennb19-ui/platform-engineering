@@ -1,0 +1,26 @@
+image:
+  registry: REPLACE_WITH_SOURCE_REGISTRY
+  repository: REPLACE_WITH_SOURCE_REPOSITORY
+
+ingress:
+  hosts:
+    - host: __APP__.localhost
+      paths:
+        - { path: /, pathType: Prefix }
+
+# ── Tuỳ chọn ──
+# replicaCount: 2
+# autoscaling:
+#   enabled: true
+#   minReplicas: 2
+#   maxReplicas: 5
+#   targetCPUUtilizationPercentage: 75
+# resources:
+#   requests: { cpu: 100m, memory: 128Mi }
+#   limits:   { memory: 256Mi }
+# podDisruptionBudget:
+#   enabled: true
+#   maxUnavailable: 1
+# env:
+#   LOG_LEVEL: info
+# nodeSelector: {}

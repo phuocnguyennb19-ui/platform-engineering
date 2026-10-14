@@ -1,0 +1,12 @@
+# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+# ── Falco engine outputs ────────────────────────────────────
+falco:
+  log_level: info
+  priority: informational
+
+# ── Falcosidekick — routing to Alertmanager + Loki ──────────
+falcosidekick:
+  replicaCount: 1
+  webui:
+    enabled: false

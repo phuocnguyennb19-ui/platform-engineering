@@ -1,0 +1,34 @@
+# staging: only the values that differ per environment — layered after ../prometheus.yaml.gotmpl
+
+# ── Chart default alerting/recording rules ──────────────────
+# Ship the curated kube/node/prometheus rules; attach a runbook base URL
+# and a common `env` label so alerts route/annotate consistently.
+defaultRules:
+  labels:
+    env: staging
+  # Silence rules that are noisy on managed/single-node clusters.
+  disabled:
+    KubeControllerManagerDown: true
+    KubeSchedulerDown: true
+
+prometheus:
+  prometheusSpec:
+    replicas: 1
+    retention: 7d
+    retentionSize: "30GB"
+
+    # Identify this Prometheus in federated/remote-write and alert payloads.
+    externalLabels:
+      cluster: staging
+      env: staging
+    externalUrl: https://prometheus.staging.{{ (.Values.ingressDomain | default "example.com") }}
+
+    resources:
+      requests: { cpu: 300m, memory: 1Gi }
+      limits:   { cpu: 1, memory: 2Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 30Gi

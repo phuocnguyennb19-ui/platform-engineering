@@ -1,0 +1,10 @@
+resources:
+  cpu: 256
+  memory: 512
+
+deployment:
+  replicas: 1
+
+network:
+  host: Bad_Host
+  path: /x/

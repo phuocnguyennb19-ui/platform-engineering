@@ -1,0 +1,79 @@
+# PIPELINE_PART keeps the two trigger contracts apart:
+#   k8s       — app deploy trigger (SERVICE_NAME/DEPLOY_ENV/IMAGE_TAG) or a web run with SERVICE_NAME / BUILD_IMAGES
+#   terraform — ECS multi-project trigger (APP_NAME/ENVIRONMENT/IMAGE_TAG) or any other web run
+#   all       — push, merge request, tag: each part is then filtered by its own `changes:`
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+      variables: { PIPELINE_PART: terraform }
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+      variables: { PIPELINE_PART: k8s }
+    - if: $CI_PIPELINE_SOURCE == "web" && ($SERVICE_NAME || $BUILD_IMAGES == "true")
+      variables: { PIPELINE_PART: k8s }
+    - if: $CI_PIPELINE_SOURCE == "web"
+      variables: { PIPELINE_PART: terraform }
+    - when: always
+      variables: { PIPELINE_PART: all }
+
+include:
+  - local: ci/k8s/main.yml
+  - local: ci/k8s/helmfile.yml
+  - local: ci/k8s/argocd.yml
+  - local: ci/terraform/modules.yml
+  - local: ci/terraform/platform.yml
+
+stages:
+  - images
+  - lint
+  - validate
+  - test
+  - build
+  - scan
+  - publish
+  - setup
+  - deploy
+  - rollback
+  - hf-lint
+  - hf-diff
+  - hf-deploy
+  - argo-validate
+  - argo-diff
+  - argo-bootstrap
+  - promote
+  - plan
+  - apply
+
+variables:
+  CHART_NAME: "application"
+  HELM_CHART_ACCOUNT_ID: "339713046864"
+  AWS_REGION: "ap-southeast-1"
+  DEV_EKS_CLUSTER: "platform-dev-eks"
+  STAGING_EKS_CLUSTER: "platform-staging-eks"
+  PRODUCTION_EKS_CLUSTER: "platform-production-eks"
+  DEPLOY_TOOLS_VERSION: "1.2.0"
+  CI_IMAGE_VERSION: "1.0.0"
+  RUNNER_VERSION: "1.0.0"
+  DEPLOY_TOOLS_IMAGE: "$CI_REGISTRY_IMAGE/deploy-tools:${DEPLOY_TOOLS_VERSION}"
+  CI_IMAGE: "$CI_REGISTRY_IMAGE/ci:${CI_IMAGE_VERSION}"
+  RUNNER_IMAGE: "$CI_REGISTRY_IMAGE/runner:${RUNNER_VERSION}"
+  DOCKER_HOST: "unix:///var/run/docker.sock"
+  DOCKER_BUILDKIT: "1"
+  TRIVY_SEVERITY: "HIGH,CRITICAL"
+  TRIVY_EXIT_CODE: "1"
+  ENVIRONMENT: dev
+  APP_NAME: ""
+  IMAGE_TAG: ""
+  TF_IMAGE: hashicorp/terraform:1.10.5@sha256:679ac5e095bf550bc726742cd12efa6050f0913080df479fdabfeb202953af28
+  TF_VERSION: "1.5.7"
+  TF_TEST_VERSION: "1.9.8"
+  YQ_APK: yq-go=4.44.5-r5
+  AWS_CLI_APK: aws-cli=2.22.10-r0
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+# k8s jobs inherit this; terraform jobs set `inherit: { default: false }` and their own image.
+default:
+  image: $DEPLOY_TOOLS_IMAGE
+  id_tokens:
+    AWS_OIDC_TOKEN:
+      aud: $CI_SERVER_URL

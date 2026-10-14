@@ -1,0 +1,627 @@
+# ============================================================
+# k8s CI/CD — AWS EKS (charts, deploy trigger, utility images)
+#
+# TWO independent pipelines:
+#
+#   CHART pipeline  — k8s/charts/** changes on main branch
+#     lint → package → publish to ECR
+#
+#   DEPLOY pipeline — triggered by source repos via pipeline trigger
+#     setup AWS → login ECR → get EKS kubeconfig
+#     → helmfile sync --selector name=<service>
+#
+# Variables injected by source repos via pipeline trigger:
+#   SERVICE_NAME       e.g. be-payment
+#   IMAGE_TAG          e.g. abc1234  (CI_COMMIT_SHORT_SHA of the source repo)
+#   DEPLOY_ENV         dev | staging | prod   (anything else fails the job)
+#   MIGRATION_ENABLED  true | false  (default: false)
+#
+# Required CI/CD variables (set at group level):
+#   DEV_AWS_ACCOUNT_ID, STAGING_AWS_ACCOUNT_ID, PRODUCTION_AWS_ACCOUNT_ID
+#       account of each environment; the job assumes role gitlab-deploy-<env> there
+#       with its GitLab OIDC token (AWS_OIDC_TOKEN) — no AWS keys anywhere
+#   SOPS_AGE_PRIVATE_KEY_DEV, SOPS_AGE_PRIVATE_KEY_STAGING (protected),
+#   SOPS_AGE_PRIVATE_KEY_PRODUCTION (protected, optional: production decrypts with KMS)
+#   DEV_EKS_CLUSTER, STAGING_EKS_CLUSTER, PRODUCTION_EKS_CLUSTER
+#       default to Terraform's names below; override only if the core output differs
+# ============================================================
+
+# Included by the root .gitlab-ci.yml (stages, variables, default live there).
+# Every job runs from k8s/; PIPELINE_PART=terraform pipelines skip them.
+.k8s-guard:
+  rules:
+    - if: $PIPELINE_PART == "terraform" || $CI_PIPELINE_SOURCE == "pipeline"
+      when: never
+
+# ─── Environment + AWS helpers ──────────────────────────────
+# DEPLOY_ENV arrives from a pipeline trigger, so it is matched against a fixed
+# list and never expanded into a variable name or evaluated.
+
+.env-select: &env-select |
+  case "${DEPLOY_ENV:-}" in
+    dev)     AWS_ACCOUNT_ID="${DEV_AWS_ACCOUNT_ID:-}";        EKS_CLUSTER="$DEV_EKS_CLUSTER";        SOPS_AGE_KEY="${SOPS_AGE_PRIVATE_KEY_DEV:-}" ;;
+    staging) AWS_ACCOUNT_ID="${STAGING_AWS_ACCOUNT_ID:-}";    EKS_CLUSTER="$STAGING_EKS_CLUSTER";    SOPS_AGE_KEY="${SOPS_AGE_PRIVATE_KEY_STAGING:-}" ;;
+    prod)    AWS_ACCOUNT_ID="${PRODUCTION_AWS_ACCOUNT_ID:-}"; EKS_CLUSTER="$PRODUCTION_EKS_CLUSTER"; SOPS_AGE_KEY="${SOPS_AGE_PRIVATE_KEY_PRODUCTION:-}" ;;
+    *) echo "[ERROR] DEPLOY_ENV must be dev, staging or prod"; exit 1 ;;
+  esac
+  echo "$AWS_ACCOUNT_ID" | grep -qE '^[0-9]{12}$' || { echo "[ERROR] set the AWS account ID variable for ${DEPLOY_ENV}"; exit 1; }
+  export AWS_ACCOUNT_ID EKS_CLUSTER
+
+.aws-auth: &aws-auth |
+  printf '%s' "$AWS_OIDC_TOKEN" > "${CI_PROJECT_DIR}/.aws-web-identity-token"
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
+  export AWS_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/gitlab-deploy-${DEPLOY_ENV}"
+  export AWS_WEB_IDENTITY_TOKEN_FILE="${CI_PROJECT_DIR}/.aws-web-identity-token"
+  export AWS_ROLE_SESSION_NAME="gitlab-${CI_PROJECT_ID}-${CI_JOB_ID}"
+  [ "$(aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID" ] || { echo "[ERROR] OIDC role is not in account ${AWS_ACCOUNT_ID}"; exit 1; }
+  echo "Assumed role: $AWS_ROLE_ARN"
+
+.ecr-login: &ecr-login |
+  # App image registry (deploy account)
+  aws ecr get-login-password --region $AWS_REGION \
+    | docker login --username AWS --password-stdin \
+      ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+  # Helm chart registry (shared infra account)
+  aws ecr get-login-password --region $AWS_REGION \
+    | helm registry login --username AWS --password-stdin \
+      ${HELM_CHART_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+.eks-kubeconfig: &eks-kubeconfig |
+  echo "Cluster: $EKS_CLUSTER"
+  aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+# Only this environment's key is written. Production also decrypts through
+# AWS KMS with the deploy role, so its age key is an optional break-glass.
+.sops-setup: &sops-setup |
+  mkdir -p ~/.config/sops/age
+  ( umask 077; printf '%s\n' "$SOPS_AGE_KEY" > ~/.config/sops/age/keys.txt )
+  export SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt
+  [ -n "$SOPS_AGE_KEY" ] || [ "$DEPLOY_ENV" = prod ] || { echo "[ERROR] SOPS age key for ${DEPLOY_ENV} is not set"; exit 1; }
+  unset SOPS_AGE_KEY
+
+# App registries in infra-base/k8s/env-values/<env>/app-values.yaml.gotmpl are plain YAML (Argo CD reads them),
+# so the account ID is written there; nothing deploys while a marker is left.
+.config-complete: &config-complete |
+  if grep -n 'REPLACE_WITH_' "../infra-base/k8s/env-values/${DEPLOY_ENV}/app-values.yaml.gotmpl"; then
+    echo "[ERROR] ../infra-base/k8s/env-values/${DEPLOY_ENV}/app-values.yaml.gotmpl still has a REPLACE_WITH_ marker (ECR account ID)"; exit 1
+  fi
+
+# Copies every Bitnami image the platform releases reference from
+# docker.io/bitnamilegacy into this environment's ECR mirror (bitnami/<image>,
+# created by terraform/stacks/registry). Idempotent: present tags are skipped.
+.mirror-images: &mirror-images |
+  set -euo pipefail
+  REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  case "$(uname -m)" in
+    x86_64) CRANE_ARCH=x86_64; CRANE_SHA256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0 ;;
+    aarch64|arm64) CRANE_ARCH=arm64; CRANE_SHA256=898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110 ;;
+    *) echo "[ERROR] no pinned crane build for $(uname -m)"; exit 1 ;;
+  esac
+  curl -fsSL -o /tmp/crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz"
+  echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c -
+  tar -xzf /tmp/crane.tar.gz -C /tmp crane
+  aws ecr get-login-password --region "$AWS_REGION" | /tmp/crane auth login "$REGISTRY" -u AWS --password-stdin
+  RENDERED="$(helmfile -e "$DEPLOY_ENV" -l layer=platform template)"
+  for ref in $(printf '%s\n' "$RENDERED" | grep -oE "${REGISTRY}/bitnami/[a-z0-9-]+:[A-Za-z0-9._-]+" | sort -u); do
+    name="${ref#${REGISTRY}/bitnami/}"; tag="${name##*:}"; name="${name%%:*}"
+    if /tmp/crane digest "$ref" >/dev/null 2>&1; then echo "[OK] mirrored: bitnami/${name}:${tag}"; continue; fi
+    /tmp/crane copy "docker.io/bitnamilegacy/${name}:${tag}" "$ref"
+    echo "[OK] copied bitnamilegacy/${name}:${tag} → ${ref}"
+  done
+  unset RENDERED
+
+.deploy-inputs: &deploy-inputs |
+  echo "${SERVICE_NAME:-}" | grep -qE '^[a-z0-9][a-z0-9-]{0,52}$' || { echo "[ERROR] SERVICE_NAME is not a valid release name"; exit 1; }
+  [ -z "${IMAGE_TAG:-}" ] || echo "$IMAGE_TAG" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$' || { echo "[ERROR] IMAGE_TAG is not a valid tag"; exit 1; }
+  [ "${IMAGE_TAG:-}" != latest ] || { echo "[ERROR] IMAGE_TAG must not be latest"; exit 1; }
+
+# Shared with ci/k8s/*.yml through !reference (anchors do not cross files).
+.ci-env-select:     { script: [ *env-select ] }
+.ci-aws-auth:       { script: [ *aws-auth ] }
+.ci-eks-kubeconfig: { script: [ *eks-kubeconfig ] }
+.ci-sops-setup:     { script: [ *sops-setup ] }
+.ci-config-complete: { script: [ *config-complete ] }
+.ci-mirror-images:  { script: [ *mirror-images ] }
+
+# ============================================================
+# IMAGES PIPELINE — build utility Docker images
+# Trigger: ci/images/** changes on main, or a web trigger with BUILD_IMAGES=true
+#
+# Uses a Docker socket mount from the runner — no DinD/privileged needed.
+# The runner host must mount /var/run/docker.sock into the job container.
+# ============================================================
+
+.docker-build: &docker-build
+  stage: images
+  before_script:
+    # --password-stdin, not -p: a password passed as an argv element is visible
+    # in the process list of every other process on the runner host.
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+# Image 1: deploy-tools (kubectl + helm + helmfile + aws-cli + sops)
+image:deploy-tools:
+  <<: *docker-build
+  image: docker:26-cli
+  script:
+    - |
+      IMAGE="$CI_REGISTRY_IMAGE/deploy-tools"
+      VERSION="${DEPLOY_TOOLS_VERSION:-${CI_COMMIT_SHORT_SHA}}"
+
+      docker build \
+        --cache-from "${IMAGE}:${CACHE_TAG:-$VERSION}" \
+        -f ci/images/Dockerfile \
+        -t "${IMAGE}:${VERSION}" \
+        ci/images/
+
+      # No `:latest` tag is published: it would make every consumer's build
+      # non-reproducible and violates the kyverno disallow-latest-tag policy.
+      docker push "${IMAGE}:${VERSION}"
+      echo "Pushed: ${IMAGE}:${VERSION}"
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - ci/images/Dockerfile
+    - if: $BUILD_IMAGES == "true"
+
+# Image 2: ci (Go + golangci-lint + gitleaks + hadolint)
+image:ci:
+  <<: *docker-build
+  image: docker:26-cli
+  script:
+    - |
+      IMAGE="$CI_REGISTRY_IMAGE/ci"
+      VERSION="${CI_IMAGE_VERSION:-${CI_COMMIT_SHORT_SHA}}"
+
+      docker build \
+        --cache-from "${IMAGE}:${CACHE_TAG:-$VERSION}" \
+        -f ci/images/Dockerfile.ci \
+        -t "${IMAGE}:${VERSION}" \
+        ci/images/
+
+      # No `:latest` tag is published: it would make every consumer's build
+      # non-reproducible and violates the kyverno disallow-latest-tag policy.
+      docker push "${IMAGE}:${VERSION}"
+      echo "Pushed: ${IMAGE}:${VERSION}"
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - ci/images/Dockerfile.ci
+    - if: $BUILD_IMAGES == "true"
+
+# Image 3: runner (gitlab-runner + docker-cli)
+image:runner:
+  <<: *docker-build
+  image: docker:26-cli
+  script:
+    - |
+      IMAGE="$CI_REGISTRY_IMAGE/runner"
+      VERSION="${RUNNER_VERSION:-${CI_COMMIT_SHORT_SHA}}"
+
+      docker build \
+        --cache-from "${IMAGE}:${CACHE_TAG:-$VERSION}" \
+        -f ci/images/Dockerfile.runner \
+        -t "${IMAGE}:${VERSION}" \
+        ci/images/
+
+      # No `:latest` tag is published: it would make every consumer's build
+      # non-reproducible and violates the kyverno disallow-latest-tag policy.
+      docker push "${IMAGE}:${VERSION}"
+      echo "Pushed: ${IMAGE}:${VERSION}"
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - ci/images/Dockerfile.runner
+    - if: $BUILD_IMAGES == "true"
+
+# ============================================================
+# CHART PIPELINE — triggered when charts/** changes
+# ============================================================
+
+.chart-changes: &chart-changes
+  changes:
+    - k8s/charts/**/*
+    # App-tier inputs. The tree is flat, so the app folders are named
+    # explicitly — there is no `workloads/**` prefix to glob any more.
+    - infra-base/k8s/env-values/app-values.yaml.gotmpl
+    - infra-base/k8s/env-values/*/app-values.yaml.gotmpl
+    - applications/*/k8s/**/*
+    - k8s/apps/be-payment/**/*
+    - k8s/apps/be-user/**/*
+
+chart:lint:
+  stage: lint
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger"
+      <<: *chart-changes
+  script:
+    # `ct`-style value matrix: each charts/application/ci/*-values.yaml is a
+    # separate case. Without this, only the default path is ever exercised and a
+    # break confined to StatefulSet / DaemonSet / Gateway API / workers ships.
+    - |
+      set -eu
+      fail=0
+      for f in charts/application/ci/*-values.yaml; do
+        printf '── lint %s\n' "$(basename "$f")"
+        helm lint charts/application -f "$f" || fail=1
+        helm template ci charts/application -f "$f" > /dev/null || fail=1
+      done
+      [ "$fail" -eq 0 ] || { echo "chart ci matrix failed"; exit 1; }
+
+# The values every service ACTUALLY deploys with must still render, satisfy
+# values.schema.json and pass kubeconform. One job per environment, each holding
+# only that environment's SOPS key; staging and prod keys are protected, so those
+# renders run on protected branches only.
+.chart-render:
+  stage: lint
+  script:
+    - |
+      set -eu
+      fail=0
+      for svc in be-user be-payment; do
+        [ -f "apps/${svc}/helmfile.yaml.gotmpl" ] || continue
+        echo "── render ${svc} @ ${DEPLOY_ENV}"
+        if ! CHART_PATH="$(pwd)/charts/application" \
+             helmfile -f helmfile.yaml.gotmpl -e "${DEPLOY_ENV}" \
+                      template -l "name=${svc}" >/dev/null; then
+          echo "[FAIL] ${svc} @ ${DEPLOY_ENV}"
+          fail=1
+        fi
+      done
+      [ "$fail" -eq 0 ] || { echo "chart render failed for at least one service"; exit 1; }
+    - |
+      set -eu
+      CHART_PATH="$(pwd)/charts/application" \
+        helmfile -f helmfile.yaml.gotmpl -e "${DEPLOY_ENV}" template \
+        | kubeconform -strict -summary \
+                      -ignore-missing-schemas \
+                      -schema-location default \
+                      -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+
+chart:render:dev:
+  extends: .chart-render
+  variables: { DEPLOY_ENV: dev }
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    - *env-select
+    - *sops-setup
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger"
+      <<: *chart-changes
+
+chart:render:staging:
+  extends: .chart-render
+  variables: { DEPLOY_ENV: staging }
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    - *env-select
+    - *sops-setup
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_REF_PROTECTED == "true"
+      <<: *chart-changes
+
+chart:render:prod:
+  extends: .chart-render
+  variables: { DEPLOY_ENV: prod }
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    - *env-select
+    - *aws-auth
+    - *sops-setup
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_REF_PROTECTED == "true"
+      <<: *chart-changes
+
+# ============================================================
+# REPO SECURITY SCANS — run in the `ci` image (gitleaks + hadolint + trivy).
+# The ci image was previously built by image:ci and then used by NO job.
+# ============================================================
+
+# Secret detection across the full history. Catches exactly the class of
+# mistake this repo already had: infra-base/k8s/env-values/*/secrets.enc.yaml committed unencrypted.
+security:gitleaks:
+  stage: test
+  image: $CI_IMAGE
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  script:
+    - gitleaks detect --source . --redact --verbose --exit-code 1
+
+# SOPS guard: every infra-base/k8s/env-values/<env>/secrets.enc.yaml must be encrypted before it can merge.
+security:sops-encrypted:
+  stage: test
+  image: $CI_IMAGE
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: [ "infra-base/k8s/env-values/*/secrets.enc.yaml" ]
+    - if: $CI_COMMIT_BRANCH
+      changes: [ "infra-base/k8s/env-values/*/secrets.enc.yaml" ]
+  script:
+    - |
+      rc=0
+      for f in infra-base/k8s/env-values/*/secrets.enc.yaml; do
+        if grep -q "^sops:" "$f" || grep -q "ENC\[" "$f"; then
+          echo "[OK]   $f is SOPS-encrypted"
+        else
+          echo "[FAIL] $f is PLAINTEXT — run: sops -e -i $f"; rc=1
+        fi
+      done
+      exit $rc
+
+security:hadolint:
+  stage: test
+  image: $CI_IMAGE
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: [ "ci/images/**/*" ]
+    - if: $CI_COMMIT_BRANCH
+      changes: [ "ci/images/**/*" ]
+  script:
+    - hadolint ci/images/Dockerfile ci/images/Dockerfile.ci ci/images/Dockerfile.runner
+
+chart:package:
+  stage: build
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger"
+      changes:
+        - k8s/charts/**/*
+  script:
+    - CHART_VERSION=$(grep '^version:' charts/application/Chart.yaml | awk '{print $2}')
+    - echo "CHART_VERSION=$CHART_VERSION" >> chart.env
+    - helm package charts/application --destination dist/
+    - 'echo "Packaged: dist/${CHART_NAME}-${CHART_VERSION}.tgz"'
+  artifacts:
+    paths:
+      - k8s/dist/
+    reports:
+      dotenv: k8s/chart.env
+    expire_in: 1 week
+
+# SBOM for the packaged chart + a scan of the images it references. Produces
+# the provenance the kyverno supply-chain policies expect to exist.
+chart:scan:
+  stage: scan
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+  image: $CI_IMAGE
+  needs:
+    - job: chart:package
+      artifacts: true
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger"
+      <<: *chart-changes
+  script:
+    - |
+      set -eu
+      mkdir -p reports
+      # Config scan of the manifests that will ACTUALLY be applied: every app's
+      # prod layers (env-values → infra-base/k8s/env-values/prod → applications/<app>/k8s → k8s/prod).
+      # These layers hold no secrets, so no key is needed, and the rendered
+      # manifests stay in a temp dir — they are not kept as an artifact.
+      RENDER_DIR="$(mktemp -d)"
+      for app in ../applications/*/k8s/; do
+        app="$(basename "$(dirname "$app")")"
+        helm template "$app" charts/application \
+          -f ../infra-base/k8s/env-values/app-values.yaml.gotmpl -f ../infra-base/k8s/env-values/prod/app-values.yaml.gotmpl \
+          -f "../applications/${app}/k8s/values.yaml" -f "../applications/${app}/k8s/prod/values.yaml" \
+          > "${RENDER_DIR}/${app}.yaml"
+      done
+
+      # --exit-code 1: the scan is a gate, not a wall poster. It was 0 before,
+      # so no finding at any severity could ever fail the pipeline.
+      trivy config --severity "$TRIVY_SEVERITY" --exit-code 1 \
+            --format table "$RENDER_DIR" | tee reports/trivy-config.txt
+      rm -rf "$RENDER_DIR"
+
+      # CycloneDX SBOM of the chart package.
+      trivy fs --format cyclonedx --output reports/chart-sbom.cdx.json dist/
+      echo "[OK] SBOM: reports/chart-sbom.cdx.json"
+  artifacts:
+    paths:
+      - k8s/reports/
+    expire_in: 1 month
+
+chart:publish:
+  stage: publish
+  needs:
+    - job: chart:package
+      artifacts: true
+    - job: chart:scan
+      artifacts: false
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - k8s/charts/**/*
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    # Charts live in the shared-infra account, not an environment account.
+    - '[ -n "${CHART_PUBLISH_ROLE_ARN:-}" ] || { echo "[ERROR] set CHART_PUBLISH_ROLE_ARN (OIDC role in account ${HELM_CHART_ACCOUNT_ID})"; exit 1; }'
+    - printf '%s' "$AWS_OIDC_TOKEN" > "${CI_PROJECT_DIR}/.aws-web-identity-token"
+    - export AWS_ROLE_ARN="$CHART_PUBLISH_ROLE_ARN" AWS_WEB_IDENTITY_TOKEN_FILE="${CI_PROJECT_DIR}/.aws-web-identity-token" AWS_ROLE_SESSION_NAME="gitlab-${CI_PROJECT_ID}-${CI_JOB_ID}"
+  script:
+    - aws ecr get-login-password --region "$AWS_REGION" | helm registry login --username AWS --password-stdin "${HELM_CHART_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    - |
+      if [ -z "$CHART_VERSION" ]; then
+        echo "[ERROR] CHART_VERSION is empty — chart:package artifact may be missing"
+        exit 1
+      fi
+      CHART_REGISTRY="oci://${HELM_CHART_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/helm"
+      helm push "dist/${CHART_NAME}-${CHART_VERSION}.tgz" "$CHART_REGISTRY"
+      echo "Published: ${CHART_REGISTRY}/${CHART_NAME}:${CHART_VERSION}"
+
+      # ── Keyless cosign signature (Sigstore + GitLab OIDC) ──
+      # kyverno/manifests/policies-supplychain.yaml `verify-image-signatures`
+      # expects a keyless signature from https://gitlab.com/<group>/*. Without
+      # this step that policy can never move from Audit to Enforce.
+      # Requires `id_tokens` below; skipped cleanly if cosign is unavailable.
+      if command -v cosign >/dev/null 2>&1; then
+        REF="${HELM_CHART_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/helm/${CHART_NAME}:${CHART_VERSION}"
+        COSIGN_EXPERIMENTAL=1 SIGSTORE_ID_TOKEN="$SIGSTORE_ID_TOKEN" \
+          cosign sign --yes "$REF"
+        echo "Signed: $REF"
+      else
+        echo "[WARN] cosign not in \$CI_IMAGE — chart published UNSIGNED."
+        echo "       Add cosign to ci/images/Dockerfile.ci to enable verification."
+      fi
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+
+# ============================================================
+# DEPLOY PIPELINE — triggered by source repos
+# ============================================================
+
+deploy:setup:
+  stage: setup
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - *env-select
+    - *deploy-inputs
+    - *config-complete
+    - *aws-auth
+    - *ecr-login
+    - *eks-kubeconfig
+    - *sops-setup
+    - |
+      echo "=== Deploy Info ==="
+      echo "Service   : $SERVICE_NAME"
+      echo "Env       : $DEPLOY_ENV"
+      echo "Image tag : $IMAGE_TAG"
+      echo "Cluster   : $EKS_CLUSTER"
+      echo "Migration : ${MIGRATION_ENABLED:-false}"
+
+      # Dry-run: validate all templates render cleanly before applying
+      cd .
+      export HELMFILE_WORKDIR=$(mktemp -d)
+      IMAGE_TAG=$IMAGE_TAG helmfile \
+        --selector name=$SERVICE_NAME \
+        -e $DEPLOY_ENV \
+        template > /dev/null
+      echo "[OK] Template render passed"
+
+deploy:apply:
+  stage: deploy
+  needs: ["deploy:setup"]
+  rules:
+    - !reference [.k8s-guard, rules]
+    # PROD REQUIRES A HUMAN. Previously prod deployed automatically on any
+    # pipeline trigger from a source repo — a merge in an app repo could ship
+    # straight to production with no approval. The infrastructure pipeline
+    # (ci/k8s/helmfile.yml) already gated prod this way; this brings the
+    # app pipeline in line.
+    - if: $DEPLOY_ENV == "prod"
+      when: manual
+      allow_failure: false
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  environment:
+    name: $DEPLOY_ENV/$SERVICE_NAME
+    url: https://$SERVICE_NAME.$DEPLOY_ENV.example.com
+    on_stop: deploy:rollback
+  # One deploy (or rollback) of a service per environment at a time.
+  resource_group: $DEPLOY_ENV-$SERVICE_NAME
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    - *env-select
+    - *deploy-inputs
+    - *config-complete
+    - *aws-auth
+    - *ecr-login
+    - *eks-kubeconfig
+    - *sops-setup
+  script:
+    - |
+      export HELMFILE_WORKDIR=$(mktemp -d)
+
+      echo "[INFO] Deploying ${SERVICE_NAME} → ${DEPLOY_ENV} @ ${IMAGE_TAG}"
+
+      cd .
+      IMAGE_TAG=$IMAGE_TAG helmfile sync \
+        --selector name=$SERVICE_NAME \
+        -e $DEPLOY_ENV
+
+      echo "[INFO] Deploy complete"
+      echo ""
+      echo "=== Deployed Resources ==="
+      kubectl get deployment,cronjob \
+        -n "${DEPLOY_ENV}" \
+        -l "app.kubernetes.io/instance=${SERVICE_NAME}" \
+        --show-labels
+      echo ""
+      echo "=== Rollout Status ==="
+      kubectl rollout status deployment \
+        -n "${DEPLOY_ENV}" \
+        -l "app.kubernetes.io/instance=${SERVICE_NAME}" \
+        --timeout=120s
+
+# ============================================================
+# ROLLBACK — manual safety net.
+#
+# helmDefaults in infra-base/k8s/env-values/repositories.yaml sets atomic:false and cleanupOnFail:false
+# (deliberately, so a failed release can be inspected). The trade-off is that
+# nothing rolls back on its own, and until now the pipeline had no rollback
+# path at all. `helm rollback` returns the release to the previous revision;
+# historyMax:5 keeps five to choose from.
+#
+# Usage: run from the GitLab UI on the failed environment, optionally setting
+#        ROLLBACK_REVISION to a specific revision from `helm history`.
+# ============================================================
+deploy:rollback:
+  stage: rollback
+  needs: ["deploy:apply"]
+  resource_group: $DEPLOY_ENV-$SERVICE_NAME
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+      when: manual
+      allow_failure: false
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+      allow_failure: false
+  environment:
+    name: $DEPLOY_ENV/$SERVICE_NAME
+    action: stop
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    - *env-select
+    - *deploy-inputs
+    - *aws-auth
+    - *ecr-login
+    - *eks-kubeconfig
+  script:
+    - |
+      set -eu
+      echo "=== Release history: ${SERVICE_NAME} (ns ${DEPLOY_ENV}) ==="
+      helm history "$SERVICE_NAME" -n "$DEPLOY_ENV"
+
+      REV="${ROLLBACK_REVISION:-0}"     # 0 = previous revision
+      echo "[INFO] Rolling ${SERVICE_NAME} back to revision ${REV} (0 = previous)"
+      helm rollback "$SERVICE_NAME" "$REV" -n "$DEPLOY_ENV" --wait --timeout 5m
+
+      kubectl rollout status deployment \
+        -n "${DEPLOY_ENV}" \
+        -l "app.kubernetes.io/instance=${SERVICE_NAME}" \
+        --timeout=180s
+      echo "[OK] Rollback complete"

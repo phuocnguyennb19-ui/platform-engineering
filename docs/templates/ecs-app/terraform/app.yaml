@@ -1,0 +1,20 @@
+application:
+  name: __APP__
+
+runtime:
+  type: ecs
+
+image:
+  repository: __APP__
+  # tag: "1.2.3"
+
+container:
+  port: 8080
+  # health_check_command: ["CMD", "/app", "-healthcheck"]
+  # health_check_path: /healthz
+  # readonly_root_filesystem: true
+
+# network:
+#   host: __APP__.example.com
+#   path: /
+#   priority: 100

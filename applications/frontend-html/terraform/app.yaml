@@ -1,0 +1,11 @@
+application:
+  name: frontend-html
+
+runtime:
+  type: eks
+
+image:
+  repository: frontend-html
+
+container:
+  port: 8080

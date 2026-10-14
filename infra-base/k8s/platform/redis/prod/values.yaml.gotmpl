@@ -1,0 +1,42 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+architecture: replication
+
+master:
+  persistence:
+    size: 20Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: 1, memory: 1Gi }
+  pdb:
+    create: true
+
+networkPolicy:
+  enabled: true
+replica:
+  replicaCount: 2
+  persistence:
+    enabled: true
+    size: 20Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: 1, memory: 1Gi }
+  pdb:
+    create: true
+    maxUnavailable: 1
+  podAntiAffinityPreset: hard
+
+# Sentinel for automatic failover (prod HA).
+sentinel:
+  enabled: true
+  quorum: 2
+  masterSet: mymaster
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 128Mi }

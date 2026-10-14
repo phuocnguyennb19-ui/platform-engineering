@@ -1,0 +1,15 @@
+application:
+  name: web
+
+runtime:
+  type: ecs
+
+image:
+  repository: web-api
+
+container:
+  port: 8080
+  health_check_command: ["CMD", "/web", "-healthcheck"]
+
+network:
+  host: web.example.com

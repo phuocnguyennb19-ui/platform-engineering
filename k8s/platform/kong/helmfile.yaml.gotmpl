@@ -1,0 +1,31 @@
+# ============================================================
+# kong — API gateway. Cluster-wide plugins live in manifests/ (kubectl apply after sync).
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f kong/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../infra-base/k8s/env-values/environments.yaml
+  - ../../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: kong
+    namespace: infra
+    chart: kong/kong
+    version: 2.51.0
+    missingFileHandler: Warn
+    labels: { name: kong, layer: platform, tier: infra, component: gateway, env: "{{ $env }}" }
+    values:
+      - ../../../infra-base/k8s/platform/kong/values.yaml.gotmpl
+      - ../../../infra-base/k8s/platform/kong/{{ .Environment.Name }}/values.yaml.gotmpl

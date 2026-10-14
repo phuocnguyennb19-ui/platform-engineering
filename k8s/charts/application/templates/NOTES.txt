@@ -1,0 +1,101 @@
+{{ .Chart.Name }}-{{ .Chart.Version }}  •  release {{ .Release.Name }}  •  ns {{ include "application.namespace" . }}
+
+  Workload  {{ .Values.workload.kind }}  {{ if or .Values.autoscaling.enabled .Values.keda.enabled }}(autoscaled){{ else }}({{ .Values.replicaCount }} replicas){{ end }}
+  Image     {{ include "application.image" . }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- if .Values.ingress.enabled }}
+
+ENDPOINTS
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ tpl (toString .host) $ }}
+{{- end }}
+{{- else if .Values.httpRoute.enabled }}
+
+ENDPOINTS (Gateway API)
+{{- range .Values.httpRoute.hostnames }}
+  https://{{ tpl (toString .) $ }}
+{{- end }}
+{{- else if .Values.service.enabled }}
+
+ENDPOINT (internal only)
+  {{ include "application.fullname" . }}.{{ include "application.namespace" . }}.svc.cluster.local:{{ .Values.service.port }}
+
+  kubectl -n {{ include "application.namespace" . }} port-forward svc/{{ include "application.fullname" . }} 8080:{{ .Values.service.port }}
+{{- end }}
+
+VERIFY
+  kubectl -n {{ include "application.namespace" . }} rollout status {{ .Values.workload.kind | lower }}/{{ include "application.fullname" . }}
+{{- if .Values.tests.enabled }}
+  helm test {{ .Release.Name }} -n {{ include "application.namespace" . }}
+{{- end }}
+{{- if .Values.service.enabled }}
+  kubectl -n {{ include "application.namespace" . }} get endpointslice -l kubernetes.io/service-name={{ include "application.fullname" . }}
+{{- end }}
+
+{{- if .Values.workers }}
+
+WORKERS  (own component label — never endpoints of the app Service)
+{{- range .Values.workers }}
+{{- if .enabled }}
+  • {{ include "application.fullname" $ }}-{{ .name }}
+    {{- if and .keda .keda.enabled }}  KEDA {{ .keda.minReplicaCount | default 1 }}–{{ .keda.maxReplicaCount | default 10 }}
+    {{- else if and .autoscaling .autoscaling.enabled }}  HPA {{ .autoscaling.minReplicas | default 1 }}–{{ .autoscaling.maxReplicas | default 5 }}
+    {{- else }}  {{ .replicaCount | default 1 }} replicas
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.cronjobs }}
+
+CRONJOBS  (timezone {{ .Values.cronjobDefaults.timeZone }})
+{{- range .Values.cronjobs }}
+{{- if .enabled }}
+  • {{ include "application.fullname" $ }}-{{ .name }}  {{ .schedule }}{{ if .suspend }}  [SUSPENDED]{{ end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- $warn := list }}
+{{- if not .Values.probes.readiness }}
+{{- $warn = append $warn "no readinessProbe — with strategy.rollingUpdate.maxUnavailable=0 a rollout still sends traffic to cold pods" }}
+{{- end }}
+{{- if not .Values.probes.liveness }}
+{{- $warn = append $warn "no livenessProbe — a wedged process is never restarted" }}
+{{- end }}
+{{- if not .Values.resources }}
+{{- $warn = append $warn "no resources — kyverno require-requests-limits will flag this workload" }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- $warn = append $warn "no NetworkPolicy — this namespace is open east-west" }}
+{{- end }}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.podDisruptionBudget.enabled) }}
+{{- $warn = append $warn "no PodDisruptionBudget — a node drain can take every replica at once" }}
+{{- end }}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.topologySpreadConstraints) }}
+{{- $warn = append $warn "no topologySpreadConstraints — all replicas may land on one node or one AZ" }}
+{{- end }}
+{{- if .Values.secretEnv }}
+{{- $warn = append $warn "secretEnv renders inline in the pod spec (readable via kubectl/etcd) — prefer externalSecret or extraEnvFrom" }}
+{{- end }}
+{{- if .Values.secret.enabled }}
+{{- $warn = append $warn "chart-owned Secret in use — ensure the source values file is SOPS-encrypted before commit" }}
+{{- end }}
+{{- if .Values.serviceAccount.automountServiceAccountToken }}
+{{- $warn = append $warn "service-account token is mounted — only keep this if the app calls the Kubernetes API" }}
+{{- end }}
+{{- if .Values.hostNetwork }}
+{{- $warn = append $warn "hostNetwork is on — the pod shares the node network namespace" }}
+{{- end }}
+{{- if $warn }}
+
+PRODUCTION READINESS — {{ len $warn }} item(s) to review:
+{{- range $warn }}
+  ⚠  {{ . }}
+{{- end }}
+{{- else }}
+
+✓ Production checklist clean: probes, resources, NetworkPolicy, PDB, spread, secrets.
+{{- end }}

@@ -1,0 +1,74 @@
+# ============================================================
+# OpenSearch — search / log-analytics cluster
+# Chart: opensearch/opensearch  (StatefulSet)
+#
+# dev     → single node (discovery.type=single-node), small PVC
+# staging → 3 nodes, moderate PVC
+# prod    → 3 nodes, larger PVC, PDB, anti-affinity, HEAP tuned
+#
+# Security: the chart ships DEMO TLS certs + default admin password.
+# For staging/prod you MUST replace them:
+#   - provide real node/admin certs via a secret
+#   - set OPENSEARCH_INITIAL_ADMIN_PASSWORD from a SOPS secret
+# ============================================================
+
+clusterName: opensearch
+nodeGroup: master
+# Service name apps/Grafana use: opensearch-cluster-master
+masterService: opensearch-cluster-master
+
+roles:
+  - master
+  - ingest
+  - data
+  - remote_cluster_client
+
+persistence:
+  enabled: true
+  {{- if (.Values.storageClass) }}
+  storageClass: {{ (.Values.storageClass) }}
+  {{- end }}
+  accessModes: ["ReadWriteOnce"]
+
+# Node bootstrap: raise mmap limit for Lucene.
+sysctlInit:
+  enabled: true
+
+# ── Security ────────────────────────────────────────────────
+# Admin password comes from the centralized SOPS env-secret
+# (.Values.secrets.opensearch.password). This release OWNS the shared
+# `opensearch-admin` Secret (extraObjects below); the pod reads it via
+# secretKeyRef — password stays in a Secret, never in the pod spec.
+# OpenSearch Dashboards + Grafana consume the SAME value.
+extraEnvs:
+  - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: opensearch-admin
+        key: password
+
+# Shared opensearch-admin Secret, materialized from the SOPS env-secret.
+extraObjects:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: opensearch-admin
+      labels:
+        app.kubernetes.io/part-of: observability
+        tier: infra
+    type: Opaque
+    stringData:
+      username: admin
+      password: {{ .Values.secrets.opensearch.password | quote }}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+
+# Scrape via prometheus-exporter plugin if installed; ServiceMonitor optional.
+serviceMonitor:
+  enabled: false

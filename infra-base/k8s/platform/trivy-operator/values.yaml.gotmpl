@@ -1,0 +1,26 @@
+# Trivy Operator — in-cluster vulnerability + misconfig scanning
+
+# Scan all namespaces ("" = all).
+targetNamespaces: ""
+
+operator:
+  scannerReportTTL: "24h"
+  vulnerabilityScannerEnabled: true
+  configAuditScannerEnabled: true
+  rbacAssessmentScannerEnabled: true
+  exposedSecretScannerEnabled: true
+  metricsFindingsEnabled: true
+
+trivy:
+  # Skip CVEs without a fix to reduce noise.
+  ignoreUnfixed: true
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits:   { cpu: 500m, memory: 256Mi }
+
+serviceMonitor:
+  enabled: true

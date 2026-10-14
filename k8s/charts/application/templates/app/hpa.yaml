@@ -1,0 +1,44 @@
+{{- /* HPA for the application workload.
+       `behavior` is on by default: without a stabilization window a service with
+       spiky traffic oscillates between min and max replicas, which costs money
+       and churns connections. */ -}}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: {{ include "application.hpa.apiVersion" . }}
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: {{ .Values.workload.kind }}
+    name: {{ include "application.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- with .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with .Values.autoscaling.customMetrics }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

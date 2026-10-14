@@ -1,0 +1,17 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+controller:
+  ingressClassResource:
+    name: nginx-prod
+    controllerValue: "k8s.io/ingress-nginx-prod"
+  ingressClass: nginx-prod
+
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1

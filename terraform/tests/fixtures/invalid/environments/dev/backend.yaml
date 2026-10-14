@@ -1,0 +1,5 @@
+bucket: acme-dev-tfstate
+region: ap-southeast-1
+encrypt: true
+use_lockfile: true
+key: dev/core/core.tfstate

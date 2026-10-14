@@ -1,0 +1,4 @@
+bucket: acme-prod-tfstate
+region: ap-southeast-1
+encrypt: true
+use_lockfile: true

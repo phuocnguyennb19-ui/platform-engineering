@@ -1,0 +1,74 @@
+# prod: only the values that differ per environment — layered after ../prometheus.yaml.gotmpl
+
+# ── Chart default alerting/recording rules ──────────────────
+# Ship the curated kube/node/prometheus rules; attach a runbook base URL
+# and a common `env` label so alerts route/annotate consistently.
+defaultRules:
+  labels:
+    env: prod
+
+prometheus:
+  prometheusSpec:
+    replicas: 2
+    retention: 15d
+    retentionSize: "100GB"
+
+    # Identify this Prometheus in federated/remote-write and alert payloads.
+    externalLabels:
+      cluster: prod
+      env: prod
+    externalUrl: https://prometheus.prod.{{ (.Values.ingressDomain | default "example.com") }}
+
+    resources:
+      requests: { cpu: 1, memory: 4Gi }
+      limits:   { cpu: 2, memory: 8Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 100Gi
+    # Spread the replicas across nodes/zones for HA.
+    podAntiAffinity: soft
+    podAntiAffinityTopologyKey: kubernetes.io/hostname
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+
+    # ── Long-term storage (prod) → Grafana Mimir ────────────
+    # Ship samples to the in-cluster Mimir gateway for durable, long-retention
+    # metrics (backed by MinIO S3). Grafana queries Mimir as the historical
+    # Prometheus datasource. Single-tenant → no auth header; front with an
+    # authproxy + basic-auth secret if multitenancy is enabled in Mimir.
+    remoteWrite:
+      - url: http://mimir-gateway.observability.svc.{{ .Values.clusterDomain }}/api/v1/push
+        headers:
+          X-Scope-OrgID: "prod"
+        # Protect Prometheus memory during Mimir outages.
+        queueConfig:
+          capacity: 10000
+          maxShards: 50
+          maxSamplesPerSend: 2000
+        writeRelabelConfigs: []
+  # HA: keep quorum during voluntary disruptions.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# ── Custom rules (recording/alerting) ───────────────────────
+# Drop-in PrometheusRule groups managed alongside the stack. Example:
+# additionalPrometheusRulesMap:
+#   app-slo-rules:
+#     groups:
+#       - name: app-slo
+#         rules:
+#           - alert: HighErrorRate
+#             expr: sum(rate(http_requests_total{code=~"5.."}[5m])) by (service)
+#                   / sum(rate(http_requests_total[5m])) by (service) > 0.05
+#             for: 10m
+#             labels: { severity: critical }
+#             annotations: { summary: "5xx error rate >5% on {{`{{ $labels.service }}`}}" }

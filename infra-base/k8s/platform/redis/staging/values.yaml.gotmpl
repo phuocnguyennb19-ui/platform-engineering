@@ -1,0 +1,18 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+architecture: standalone
+
+master:
+  persistence:
+    size: 8Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  pdb:
+    create: false
+
+networkPolicy:
+  enabled: false

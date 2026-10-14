@@ -1,0 +1,122 @@
+# ============================================================
+# MinIO — S3-compatible object store (self-hosted)
+# Chart: minio/minio · ns `database`
+#
+# Backend for: Mimir blocks, Loki chunks, Tempo traces, Harbor registry,
+# and (optionally) Velero — anything that wants S3 without a cloud account.
+#
+# Topology:
+#   dev/staging → mode=standalone (1 node, 1 drive) — NOT HA, fine for non-prod
+#   prod        → mode=distributed (4 nodes × 1 drive, erasure-coded) — HA
+#
+# Secrets (SOPS → .Values.secrets.minio.*):
+#   rootUser · rootPassword     → admin credentials (this file)
+#   Per-service access keys are provisioned as MinIO `users` + `policies`
+#   below; their secrets are surfaced to consumers via their own SOPS keys.
+#
+# What lives where:
+#   values.yaml.gotmpl → topology, sizing, buckets/policies/users, ingress
+#   Secret (SOPS)      → root creds + per-service secretKeys
+#   config/            → n/a (MinIO is configured via env + this chart)
+# ============================================================
+
+fullnameOverride: minio
+drivesPerNode: 1
+
+image:
+  repository: quay.io/minio/minio
+  tag: RELEASE.2025-04-08T15-41-24Z
+  pullPolicy: IfNotPresent
+mcImage:
+  repository: quay.io/minio/mc
+  tag: RELEASE.2025-04-08T15-39-49Z
+
+# ── Root credentials (SOPS) ─────────────────────────────────
+# The chart writes these into the `minio` Secret and MINIO_ROOT_* env.
+rootUser:     {{ .Values.secrets.minio.rootUser     | quote }}
+rootPassword: {{ .Values.secrets.minio.rootPassword | quote }}
+
+# ── Persistence ─────────────────────────────────────────────
+persistence:
+  enabled: true
+  accessMode: ReadWriteOnce
+  {{- if (.Values.storageClass) }}
+  storageClass: {{ (.Values.storageClass) }}
+  {{- end }}
+
+# ── Pod / Container Security (rootless, PSS-restricted-friendly) ──
+securityContext:
+  enabled: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+containerSecurityContext:
+  enabled: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  seccompProfile: { type: RuntimeDefault }
+  capabilities: { drop: [ ALL ] }
+
+# ── Buckets (provisioned on first install by the mc post-job) ──
+buckets:
+  - { name: mimir-blocks,   policy: none, purge: false }
+  - { name: mimir-ruler,    policy: none, purge: false }
+  - { name: mimir-alerts,   policy: none, purge: false }
+  - { name: loki-chunks,    policy: none, purge: false }
+  - { name: loki-ruler,     policy: none, purge: false }
+  - { name: loki-admin,     policy: none, purge: false }
+  - { name: tempo-traces,   policy: none, purge: false }
+  - { name: harbor-registry, policy: none, purge: false }
+  - { name: velero-backups, policy: none, purge: false }
+
+# ── Least-privilege service accounts (scoped policies + users) ──
+# Each consumer gets its own access key + a policy limited to its buckets.
+# secretKeys come from SOPS so they can be shared with the consuming release.
+policies:
+  - name: mimir-rw
+    statements:
+      - resources: [ "arn:aws:s3:::mimir-blocks/*", "arn:aws:s3:::mimir-ruler/*", "arn:aws:s3:::mimir-alerts/*",
+                     "arn:aws:s3:::mimir-blocks",   "arn:aws:s3:::mimir-ruler",   "arn:aws:s3:::mimir-alerts" ]
+        actions:   [ "s3:*" ]
+  - name: loki-rw
+    statements:
+      - resources: [ "arn:aws:s3:::loki-chunks/*", "arn:aws:s3:::loki-ruler/*", "arn:aws:s3:::loki-admin/*",
+                     "arn:aws:s3:::loki-chunks",   "arn:aws:s3:::loki-ruler",   "arn:aws:s3:::loki-admin" ]
+        actions:   [ "s3:*" ]
+  - name: tempo-rw
+    statements:
+      - resources: [ "arn:aws:s3:::tempo-traces/*", "arn:aws:s3:::tempo-traces" ]
+        actions:   [ "s3:*" ]
+  - name: harbor-rw
+    statements:
+      - resources: [ "arn:aws:s3:::harbor-registry/*", "arn:aws:s3:::harbor-registry" ]
+        actions:   [ "s3:*" ]
+
+users:
+  - { accessKey: mimir,  secretKey: {{ .Values.secrets.minio.mimirSecretKey  | quote }}, policy: mimir-rw }
+  - { accessKey: loki,   secretKey: {{ .Values.secrets.minio.lokiSecretKey   | quote }}, policy: loki-rw }
+  - { accessKey: tempo,  secretKey: {{ .Values.secrets.minio.tempoSecretKey  | quote }}, policy: tempo-rw }
+  - { accessKey: harbor, secretKey: {{ .Values.secrets.minio.harborSecretKey | quote }}, policy: harbor-rw }
+
+# ── Metrics ─────────────────────────────────────────────────
+metrics:
+  serviceMonitor:
+    enabled: true
+    includeNode: true
+    additionalLabels:
+      release: kube-prometheus-stack
+
+# ── Console Ingress (S3 API stays cluster-internal) ─────────
+ingress:
+  enabled: false                       # S3 API: ClusterIP only (no public data plane)
+consoleIngress:
+  enabled: true
+  ingressClassName: {{ .Values.ingressClass }}
+  hosts:
+    - minio.{{ .Values.ingressDomain }}
+
+# ── HA & scheduling (prod) ──────────────────────────────────
+
+environment:
+  MINIO_PROMETHEUS_AUTH_TYPE: "public"   # allow ServiceMonitor scrape without a bearer token

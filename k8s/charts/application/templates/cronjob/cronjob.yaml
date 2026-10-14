@@ -1,0 +1,60 @@
+{{- /*
+CronJobs — inherit every root knob, override per job.
+
+`timeZone` matters: the CronJob controller evaluates `schedule` in UTC unless
+spec.timeZone is set. A `TZ` env var only affects the process inside the
+container, never the scheduler — "0 2 * * *" with TZ=Asia/Ho_Chi_Minh still
+fires at 09:00 local. Default comes from `cronjobDefaults.timeZone`.
+*/ -}}
+{{- range $j := .Values.cronjobs }}
+{{- if $j.enabled }}
+{{- $d := $.Values.cronjobDefaults }}
+{{- $c := include "application.componentConfig" (dict "root" $ "overrides" (omit $j "enabled" "name" "schedule" "timeZone" "suspend" "concurrencyPolicy" "backoffLimit" "activeDeadlineSeconds" "ttlSecondsAfterFinished" "successfulJobsHistoryLimit" "failedJobsHistoryLimit" "startingDeadlineSeconds" "parallelism" "completions")) | fromYaml }}
+{{- $fullname := printf "%s-%s" (include "application.fullname" $) $j.name | trunc 52 | trimSuffix "-" }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "application.namespace" $ }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "cronjob" "name" $j.name) | nindent 4 }}
+  {{- $ann := include "application.annotations" $ | trim }}
+  {{- if $ann }}
+  annotations:
+    {{- $ann | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ $j.schedule | quote }}
+  {{- with ($j.timeZone | default $d.timeZone) }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  suspend: {{ $j.suspend | default false }}
+  concurrencyPolicy: {{ $j.concurrencyPolicy | default $d.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ $j.successfulJobsHistoryLimit | default $d.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $j.failedJobsHistoryLimit | default $d.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ $j.startingDeadlineSeconds | default $d.startingDeadlineSeconds }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "application.componentSelectorLabels" (dict "root" $ "component" "cronjob" "name" $j.name) | nindent 8 }}
+    spec:
+      backoffLimit: {{ $j.backoffLimit | default $d.backoffLimit }}
+      activeDeadlineSeconds: {{ $j.activeDeadlineSeconds | default $d.activeDeadlineSeconds }}
+      {{- with ($j.ttlSecondsAfterFinished | default $d.ttlSecondsAfterFinished) }}
+      ttlSecondsAfterFinished: {{ . }}
+      {{- end }}
+      {{- with $j.parallelism }}
+      parallelism: {{ . }}
+      {{- end }}
+      {{- with $j.completions }}
+      completions: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          {{- include "application.podTemplateMetadata" (dict "root" $ "c" $c "component" "cronjob" "name" $j.name) | trim | nindent 10 }}
+        spec:
+          {{- $_ := set $c "restartPolicy" ($j.restartPolicy | default $d.restartPolicy) }}
+          {{- include "application.podSpec" (dict "root" $ "c" $c "component" "cronjob" "name" $j.name "httpPort" false) | trim | nindent 10 }}
+{{- end }}
+{{- end }}

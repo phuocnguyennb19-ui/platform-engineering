@@ -1,0 +1,14 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+# The admission controller needs >=3 replicas for HA in prod (it's on the request path).
+admissionController:
+  replicas: 1
+
+backgroundController:
+  replicas: 1
+
+reportsController:
+  replicas: 1
+
+cleanupController:
+  replicas: 1

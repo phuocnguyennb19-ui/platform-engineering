@@ -1,0 +1,8 @@
+extends: default
+
+rules:
+  key-duplicates: enable
+  document-start: disable
+  line-length: disable
+  truthy:
+    check-keys: false

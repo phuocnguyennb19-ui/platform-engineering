@@ -1,0 +1,54 @@
+# Deploy GitLab Runner on a Docker host
+#
+# Usage:
+#   GITLAB_RUNNER_TOKEN=glrt-xxxx docker compose -f ci/runner/docker-compose.yml up -d
+#   (build context is ../images — run it from the repo root)
+#
+# For Kubernetes: use the gitlab/gitlab-runner helm chart instead
+
+services:
+  gitlab-runner:
+    image: ${CI_REGISTRY_IMAGE}/gitlab-runner:${RUNNER_VERSION:-17.2.1}
+    build:
+      context: ../images
+      dockerfile: Dockerfile.runner
+    restart: unless-stopped
+    container_name: gitlab-runner-microservice
+
+    volumes:
+      # Config directory — persist runner registration
+      - /etc/gitlab-runner:/etc/gitlab-runner
+      # Docker socket — lets the runner spawn job containers
+      # Security: only expose the socket, no DinD (privileged)
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      # Override via .env file or -e flag
+      DOCKER_HOST: unix:///var/run/docker.sock
+
+    # The runner process must be able to read the Docker socket
+    # On the host: usermod -aG docker gitlab-runner
+    group_add:
+      - "${DOCKER_GID:-999}"
+
+    # Resource limits for the runner container (not the jobs)
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+        reservations:
+          memory: 128m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    healthcheck:
+      test: ["CMD", "gitlab-runner", "verify", "--delete"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

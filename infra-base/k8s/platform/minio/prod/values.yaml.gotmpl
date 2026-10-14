@@ -1,0 +1,30 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+mode: distributed
+replicas: 4
+
+# ── Persistence ─────────────────────────────────────────────
+persistence:
+  size: 200Gi
+
+resources:
+  requests: { cpu: 500m, memory: 2Gi }
+  limits:   { cpu: 2, memory: 4Gi }
+consoleIngress:
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    - secretName: minio-console-tls
+      hosts: [ "minio.{{ .Values.ingressDomain }}" ]
+
+# ── HA & scheduling (prod) ──────────────────────────────────
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            app: minio

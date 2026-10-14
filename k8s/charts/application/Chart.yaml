@@ -1,0 +1,40 @@
+apiVersion: v2
+name: application
+description: Production-grade generic chart for stateless and stateful applications, background workers and scheduled jobs on Kubernetes
+type: application
+
+# 2.0.0 — BREAKING. See UPGRADING.md before deploying.
+#   • every workload carries app.kubernetes.io/component; Service / PDB /
+#     ServiceMonitor selectors are component-scoped (Deployment.spec.selector is
+#     immutable → the release must be recreated)
+#   • workload.kind: Deployment | StatefulSet | DaemonSet
+#   • per-worker KEDA / HPA / PDB / Service / ServiceMonitor
+#   • securityDefaults is wired in (it was dead configuration in 1.x)
+#   • hardened defaults, render-time validation, RBAC, VPA, GRPCRoute,
+#     CronJob timeZone, helm test, extraObjects, values.schema.json
+version: 2.0.0
+appVersion: "1.0.0"
+keywords:
+  - application
+  - microservice
+  - generic
+  - worker
+  - cronjob
+  - production
+maintainers:
+  - name: platform-team
+annotations:
+  artifacthub.io/containsSecurityUpdates: "true"
+  artifacthub.io/changes: |
+    - kind: security
+      description: securityDefaults is now applied to every container (was dead configuration)
+    - kind: fixed
+      description: worker and cronjob pods can no longer become endpoints of the application Service
+    - kind: fixed
+      description: KEDA ScaledObject can target a worker Deployment instead of the application
+    - kind: fixed
+      description: CronJob honours spec.timeZone instead of silently scheduling in UTC
+    - kind: added
+      description: workload.kind selects Deployment, StatefulSet or DaemonSet
+    - kind: added
+      description: values.schema.json, render-time validation and helm test

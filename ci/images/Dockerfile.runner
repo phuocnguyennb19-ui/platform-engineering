@@ -1,0 +1,33 @@
+# ============================================================
+# GitLab Runner — Docker Executor
+#
+# Runner này chỉ làm 1 việc: receive job từ GitLab và spawn
+# Docker container để chạy job đó. Mọi tool (Go, gitleaks,
+# hadolint, aws-cli...) đều nằm trong CI image, KHÔNG phải
+# ở đây.
+#
+# Executor: docker
+# Privileged: false  (dùng Docker socket mount thay vì DinD)
+# ============================================================
+
+ARG GITLAB_RUNNER_VERSION=17.2.1
+
+FROM gitlab/gitlab-runner:alpine-v${GITLAB_RUNNER_VERSION}
+
+# docker CLI — để runner giao tiếp với Docker daemon của host
+# qua socket mount (/var/run/docker.sock)
+RUN apk add --no-cache \
+    docker-cli \
+    docker-cli-buildx \
+    git \
+    bash \
+    curl \
+    jq \
+    ca-certificates
+
+# Validate
+RUN gitlab-runner --version && docker --version
+
+# gitlab-runner image đã có USER gitlab-runner (uid 999)
+# Chạy non-root — socket mount cần group docker trên host
+USER gitlab-runner

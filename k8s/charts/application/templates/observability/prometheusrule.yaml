@@ -1,0 +1,83 @@
+{{- /* Per-app alert / recording rules (platform: kube-prometheus-stack).
+
+       `defaultRules` gives every service a baseline SLO alert set without each
+       team re-deriving the same PromQL. Turn individual ones off, or replace
+       the lot with `groups`. */ -}}
+{{- if .Values.prometheusRule.enabled }}
+{{- $fullname := include "application.fullname" . }}
+{{- $ns := include "application.namespace" . }}
+{{- $d := .Values.prometheusRule.defaultRules }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    {{- if $d.enabled }}
+    - name: {{ $fullname }}.rules
+      rules:
+        {{- if $d.podCrashLooping.enabled }}
+        - alert: {{ $fullname | title | replace "-" "" }}PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="{{ $ns }}",pod=~"{{ $fullname }}-.*"}[15m]) > {{ $d.podCrashLooping.threshold }}
+          for: {{ $d.podCrashLooping.for }}
+          labels:
+            severity: {{ $d.podCrashLooping.severity }}
+            service: {{ $fullname }}
+          annotations:
+            summary: "{{ $fullname }} is crash looping"
+            description: "{{`{{ $labels.pod }}`}} restarted {{`{{ $value }}`}} times in 15m."
+        {{- end }}
+        {{- if $d.podNotReady.enabled }}
+        - alert: {{ $fullname | title | replace "-" "" }}PodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="{{ $ns }}",condition="true",pod=~"{{ $fullname }}-.*"} == 0
+          for: {{ $d.podNotReady.for }}
+          labels:
+            severity: {{ $d.podNotReady.severity }}
+            service: {{ $fullname }}
+          annotations:
+            summary: "{{ $fullname }} has a pod not ready"
+            description: "{{`{{ $labels.pod }}`}} has been not-ready for {{ $d.podNotReady.for }}."
+        {{- end }}
+        {{- if $d.highMemoryUsage.enabled }}
+        - alert: {{ $fullname | title | replace "-" "" }}HighMemoryUsage
+          expr: |
+            max by (pod) (
+              container_memory_working_set_bytes{namespace="{{ $ns }}",pod=~"{{ $fullname }}-.*",container!=""}
+              / on (pod, container) group_left
+              kube_pod_container_resource_limits{namespace="{{ $ns }}",resource="memory"}
+            ) > {{ $d.highMemoryUsage.threshold }}
+          for: {{ $d.highMemoryUsage.for }}
+          labels:
+            severity: {{ $d.highMemoryUsage.severity }}
+            service: {{ $fullname }}
+          annotations:
+            summary: "{{ $fullname }} near its memory limit"
+            description: "{{`{{ $labels.pod }}`}} is at {{`{{ $value | humanizePercentage }}`}} of its memory limit — OOMKill is next."
+        {{- end }}
+        {{- if $d.highErrorRate.enabled }}
+        - alert: {{ $fullname | title | replace "-" "" }}HighErrorRate
+          expr: |
+            sum(rate({{ $d.highErrorRate.metric }}{namespace="{{ $ns }}",service="{{ $fullname }}",{{ $d.highErrorRate.errorSelector }}}[5m]))
+            / clamp_min(sum(rate({{ $d.highErrorRate.metric }}{namespace="{{ $ns }}",service="{{ $fullname }}"}[5m])), 0.001)
+            > {{ $d.highErrorRate.threshold }}
+          for: {{ $d.highErrorRate.for }}
+          labels:
+            severity: {{ $d.highErrorRate.severity }}
+            service: {{ $fullname }}
+          annotations:
+            summary: "{{ $fullname }} error rate above {{ $d.highErrorRate.threshold }}"
+            description: "5xx ratio is {{`{{ $value | humanizePercentage }}`}} over 5m."
+        {{- end }}
+    {{- end }}
+    {{- with .Values.prometheusRule.groups }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

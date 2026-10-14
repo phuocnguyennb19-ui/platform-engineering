@@ -1,0 +1,15 @@
+image:
+  tag: 9f21abc
+
+resources:
+  cpu: 1024
+  memory: 2048
+
+deployment:
+  replicas: 3
+  autoscaling:
+    min: 3
+    max: 6
+
+network:
+  host: web.prod.example.com

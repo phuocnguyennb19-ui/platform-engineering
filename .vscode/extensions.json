@@ -1,0 +1,9 @@
+{
+  // Recommended extensions for this repo. VS Code prompts to install these
+  // when the workspace is opened.
+  "recommendations": [
+    "tim-koehler.helm-intellisense",   // Helm/Go-template language support (.gotmpl)
+    "redhat.vscode-yaml",              // YAML schema validation (real .yaml files)
+    "ms-kubernetes-tools.vscode-kubernetes-tools" // k8s manifests, helm, kubectl
+  ]
+}

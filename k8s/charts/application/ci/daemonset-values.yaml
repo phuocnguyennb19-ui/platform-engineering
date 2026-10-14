@@ -1,0 +1,30 @@
+# Node-local agent: DaemonSet, host paths, tolerate every taint.
+image:
+  repository: node-agent
+  tag: "1.4.2"
+
+workload:
+  kind: DaemonSet
+  daemonset:
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 1
+
+service:
+  enabled: false
+
+tolerations:
+  - operator: Exists
+
+extraVolumes:
+  - name: varlog
+    hostPath: { path: /var/log }
+extraVolumeMounts:
+  - name: varlog
+    mountPath: /var/log
+    readOnly: true
+
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits:   { memory: 128Mi }

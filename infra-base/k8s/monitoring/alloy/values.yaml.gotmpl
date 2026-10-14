@@ -1,0 +1,28 @@
+# ============================================================
+# Alloy — node log/metric collector (DaemonSet)
+# Chart: grafana/alloy
+#
+# Runs on every node, discovers pods, tails their logs and pushes
+# to Loki at http://loki-gateway.<ns>.svc.<domain>/loki/api/v1/push
+# Replaces Promtail (deprecated).
+#
+# App-emitted OTLP telemetry goes through the OTel Collector instead;
+# Alloy here is specifically the node-level LOG shipper.
+# ============================================================
+
+fullnameOverride: alloy
+
+controller:
+  type: daemonset
+  # Tolerate every node (incl. tainted/control-plane) so logs are collected cluster-wide.
+  tolerations:
+    - operator: Exists
+
+alloy:
+  # Alloy needs to read /var/log/pods — mount the host log dir.
+  mounts:
+    varlog: true
+
+# Expose Alloy's own metrics to Prometheus.
+serviceMonitor:
+  enabled: true

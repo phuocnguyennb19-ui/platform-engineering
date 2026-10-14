@@ -1,0 +1,16 @@
+# prod: only the values that differ per environment — layered after ../alertmanager.yaml.gotmpl
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 3
+    # Used in notification links back to the Alertmanager UI.
+    externalUrl: https://alertmanager.prod.{{ (.Values.ingressDomain | default "example.com") }}
+    storage:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 10Gi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2

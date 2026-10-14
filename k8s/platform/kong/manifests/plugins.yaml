@@ -1,0 +1,66 @@
+# ============================================================
+# Kong — declarative cluster-wide plugins (KongClusterPlugin CRs)
+# The controller reconciles these; apply AFTER the kong release is up:
+#   kubectl apply -f kong/manifests/plugins.yaml
+# (Repo convention for CRs — cf. kyverno/policies.yaml, cert-manager/clusterissuer.yaml.)
+# Env-agnostic. Attach to routes/services via the label `global: "true"`
+# (cluster-wide) or by referencing the plugin name from an Ingress/HTTPRoute.
+# ============================================================
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: prometheus
+  namespace: infra
+  labels:
+    global: "true"                      # apply to ALL routes → /metrics for Prometheus
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  status_code_metrics: true
+  latency_metrics: true
+  bandwidth_metrics: true
+  per_consumer: false
+plugin: prometheus
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: correlation-id
+  namespace: infra
+  labels:
+    global: "true"                      # inject a trace-friendly request id everywhere
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  header_name: X-Request-ID
+  generator: uuid#counter
+  echo_downstream: true
+plugin: correlation-id
+---
+# Not global — reference from specific routes needing protection.
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: rate-limit-default
+  namespace: infra
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  minute: 300
+  policy: local                         # use `redis` + release/redis for multi-replica accuracy
+  limit_by: consumer
+  fault_tolerant: true
+plugin: rate-limiting
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: request-size-limit
+  namespace: infra
+  labels:
+    global: "true"
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  allowed_payload_size: 20              # MB — reject oversized bodies at the edge
+plugin: request-size-limiting

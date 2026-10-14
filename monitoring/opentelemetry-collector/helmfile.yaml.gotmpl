@@ -1,0 +1,31 @@
+# ============================================================
+# opentelemetry-collector — OTLP ingest → tempo/loki. Order: after tempo + loki.
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f opentelemetry-collector/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../infra-base/k8s/env-values/environments.yaml
+  - ../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: opentelemetry-collector
+    namespace: observability
+    chart: open-telemetry/opentelemetry-collector
+    version: 0.165.0
+    missingFileHandler: Warn
+    labels: { name: opentelemetry-collector, layer: platform, tier: infra, component: traces, env: "{{ $env }}" }
+    values:
+      - ../../infra-base/k8s/monitoring/opentelemetry-collector/values.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/opentelemetry-collector/{{ .Environment.Name }}/values.yaml.gotmpl

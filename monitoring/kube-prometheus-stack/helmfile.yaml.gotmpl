@@ -1,0 +1,40 @@
+# ============================================================
+# kube-prometheus-stack — monitoring engine — ships the ServiceMonitor/PrometheusRule CRDs every other tool's values reference. Deploys FIRST.
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f kube-prometheus-stack/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../infra-base/k8s/env-values/environments.yaml
+  - ../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: kube-prometheus-stack
+    namespace: observability
+    createNamespace: true
+    chart: prometheus-community/kube-prometheus-stack
+    version: 87.19.1
+    missingFileHandler: Warn
+    labels: { name: kube-prometheus-stack, layer: platform, tier: infra, component: metrics, env: "{{ $env }}" }
+    values:
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/values.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/{{ .Environment.Name }}/values.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/prometheus.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/{{ .Environment.Name }}/prometheus.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/scrape-configs.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/{{ .Environment.Name }}/scrape-configs.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/alertmanager.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/kube-prometheus-stack/{{ .Environment.Name }}/alertmanager.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/prometheus-rules/platform.yaml.gotmpl
+      - ../../infra-base/k8s/monitoring/prometheus-rules/{{ .Environment.Name }}/platform.yaml.gotmpl

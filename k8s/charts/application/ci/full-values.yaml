@@ -1,0 +1,72 @@
+image: { repository: myapp, tag: "1.2.3" }
+replicaCount: 3
+service: { port: 80, targetPort: 8080 }
+extraPorts:
+  - { name: metrics, containerPort: 9090, protocol: TCP }
+env: { LOG_LEVEL: info, APP_ENV: prod }
+envRaw:
+  - name: POD_IP
+    valueFrom: { fieldRef: { fieldPath: status.podIP } }
+extraEnvFrom:
+  - secretRef: { name: myapp-creds }
+probes:
+  readiness: { httpGet: { path: /readyz, port: http } }
+  liveness:  { httpGet: { path: /healthz, port: http } }
+extraVolumes: [ { name: tmp, emptyDir: { medium: Memory, sizeLimit: 128Mi } } ]
+extraVolumeMounts: [ { name: tmp, mountPath: /tmp } ]
+initContainers:
+  - name: migrate
+    command: ["./app"]
+    args: ["migrate","--up"]
+autoscaling: { enabled: true, minReplicas: 3, maxReplicas: 10 }
+podDisruptionBudget: { enabled: true, minAvailable: 2 }
+topologySpreadConstraints:
+  - { maxSkew: 1, topologyKey: topology.kubernetes.io/zone, whenUnsatisfiable: ScheduleAnyway }
+serviceMonitor: { enabled: true }
+prometheusRule: { enabled: true }
+networkPolicy:
+  enabled: true
+  ingress: { enabled: true, fromIngressNamespace: infra, fromNamespaces: [observability] }
+  egress:
+    enabled: true
+    toNamespaces:
+      - { namespace: database, ports: [ { protocol: TCP, port: 5432 } ] }
+    allowExternalHTTPS: true
+ingress:
+  enabled: true
+  className: nginx
+  hosts: [ { host: app.example.com, paths: [ { path: /, pathType: Prefix } ] } ]
+  tls: [ { secretName: app-tls, hosts: [app.example.com] } ]
+reloader: { enabled: true }
+rbac:
+  create: true
+  rules: [ { apiGroups: [""], resources: [configmaps], verbs: [get,list,watch] } ]
+workers:
+  - name: consumer
+    enabled: true
+    replicaCount: 2
+    command: ["./app"]
+    args: ["worker"]
+    env: { WORKER_ROLE: consumer }
+    extraPorts: [ { name: metrics, containerPort: 9090 } ]
+    service: { enabled: true }
+    serviceMonitor: { enabled: true, port: metrics }
+    podDisruptionBudget: { enabled: true, maxUnavailable: 1 }
+    keda:
+      enabled: true
+      minReplicaCount: 2
+      maxReplicaCount: 20
+      triggers:
+        - type: kafka
+          metadata: { bootstrapServers: "kafka:9092", consumerGroup: g, topic: t, lagThreshold: "50" }
+cronjobs:
+  - name: cleanup
+    enabled: true
+    schedule: "0 2 * * *"
+    command: ["./app"]
+    args: ["cleanup"]
+extraObjects:
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata: { name: "{{ include \"application.fullname\" . }}-extra" }
+    data: { hello: world }

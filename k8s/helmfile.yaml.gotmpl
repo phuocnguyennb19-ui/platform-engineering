@@ -1,0 +1,108 @@
+# ============================================================
+# ROOT helmfile — only INCLUDES the per-tool states (helmfiles:). No releases here.
+#
+# k8s/ layout — a folder's ROLE is still read off its `layer` label:
+#
+#   platform/<tool>/ one helm release      (helmfile.yaml.gotmpl: chart + version + labels)
+#   platform/{bootstrap,gateway-api,network-policies}/   kubectl, NOT helm
+#   apps/<app>/      one charts/application release (helmfile-owned app tier)
+#   charts/          the in-house `application` chart
+#   ../monitoring/   observability releases (kube-prometheus-stack, grafana, loki, …)
+#   ../argocd/       Argo CD App-of-Apps (alternative owner of the app tier)
+#   docs/            cross-cutting runbooks
+#
+# Values are NOT here — templates here, values in ../infra-base/k8s/:
+#   env-values/                 environments.yaml · repositories.yaml · app-values.yaml.gotmpl
+#                               <env>/app-values.yaml.gotmpl · <env>/secrets.enc.yaml (SOPS)
+#   platform/<tool>/            values.yaml.gotmpl (every env) · <env>/values.yaml.gotmpl · files/
+#   monitoring/<tool>/          same; monitoring/prometheus-rules/
+#
+# Inside a tool folder here:
+#   helmfile.yaml.gotmpl   the release (chart, version, namespace, labels, values list)
+#   manifests/             raw k8s manifests — kubectl apply, NOT rendered by helm
+#   README.md              runbook for that one tool
+#
+# A helmfile-owned app folder (apps/<app>/) keeps its own values and `config/`
+# (ConfigMap DATA layered into the chart values).
+#
+# ⚠ helmfiles: = SEPARATE states → `needs` does NOT work across folders.
+#   DEPLOY ORDER IS THIS LIST, and nothing else. Reordering it changes what
+#   installs first; the reasons are inline below. `needs` is unusable here
+#   because every folder is its own state.
+#
+# Deploy:
+#   kubectl apply -f platform/bootstrap/manifests/namespaces.yaml   # PSA namespaces FIRST
+#   helmfile -e dev deps && helmfile -e dev sync                    # everything, in order
+#   helmfile -e dev -f ../monitoring/loki/helmfile.yaml.gotmpl sync  # one tool
+#   helmfile -e dev -l component=logs sync                 # one concern
+#   helmfile -e dev -l layer=platform sync                 # infra only, no apps
+#   helmfile -e dev -l layer=app sync                      # apps only
+# ============================================================
+
+bases:
+  - ../infra-base/k8s/env-values/environments.yaml
+  - ../infra-base/k8s/env-values/repositories.yaml
+
+---
+
+helmfiles:
+  # ── cluster base ──────────────────────────────────────────────────────────
+  # kube-prometheus-stack FIRST: it ships the ServiceMonitor / PrometheusRule
+  # CRDs that nearly every other tool's values reference. Move it down and
+  # everything after it fails to render.
+  - path: ../monitoring/kube-prometheus-stack/helmfile.yaml.gotmpl
+  - path: platform/metrics-server/helmfile.yaml.gotmpl
+  - path: platform/karpenter/helmfile.yaml.gotmpl
+  - path: platform/cluster-autoscaler/helmfile.yaml.gotmpl   # off unless ENABLE_CLUSTER_AUTOSCALER=true
+  - path: platform/reloader/helmfile.yaml.gotmpl
+  - path: platform/keda/helmfile.yaml.gotmpl
+
+  # ── data ──────────────────────────────────────────────────────────────────
+  # minio first — it creates the `database` namespace and is the object store
+  # that mimir/loki/tempo/velero/harbor all write to.
+  - path: platform/minio/helmfile.yaml.gotmpl
+  - path: platform/postgresql/helmfile.yaml.gotmpl
+  - path: platform/redis/helmfile.yaml.gotmpl
+  - path: platform/kafka/helmfile.yaml.gotmpl
+  - path: platform/clickhouse/helmfile.yaml.gotmpl
+
+  # ── observability ─────────────────────────────────────────────────────────
+  # Backends before their clients: loki/tempo/opensearch exist before alloy,
+  # otel-collector and grafana point at them.
+  - path: ../monitoring/loki/helmfile.yaml.gotmpl
+  - path: ../monitoring/tempo/helmfile.yaml.gotmpl
+  - path: ../monitoring/mimir/helmfile.yaml.gotmpl
+  - path: platform/opensearch/helmfile.yaml.gotmpl
+  - path: platform/opensearch-dashboards/helmfile.yaml.gotmpl
+  - path: ../monitoring/opentelemetry-collector/helmfile.yaml.gotmpl
+  - path: ../monitoring/alloy/helmfile.yaml.gotmpl
+  - path: ../monitoring/grafana/helmfile.yaml.gotmpl
+
+  # ── networking ────────────────────────────────────────────────────────────
+  # cert-manager first: it creates the `infra` namespace and must exist before
+  # anything requests a Certificate (vault does, below).
+  - path: platform/cert-manager/helmfile.yaml.gotmpl
+  - path: platform/ingress-nginx/helmfile.yaml.gotmpl
+  - path: platform/kong/helmfile.yaml.gotmpl
+  - path: platform/external-dns/helmfile.yaml.gotmpl
+
+  # ── security ──────────────────────────────────────────────────────────────
+  # After networking: vault's ingress + TLS cert need cert-manager and an
+  # IngressClass. After observability: falco ships alerts to loki.
+  - path: platform/vault/helmfile.yaml.gotmpl
+  - path: platform/external-secrets/helmfile.yaml.gotmpl
+  - path: platform/sealed-secrets/helmfile.yaml.gotmpl
+  - path: platform/kyverno/helmfile.yaml.gotmpl
+  - path: platform/trivy-operator/helmfile.yaml.gotmpl
+  - path: platform/falco/helmfile.yaml.gotmpl
+
+  # ── delivery ──────────────────────────────────────────────────────────────
+  # harbor LAST of the infra tier: it needs postgresql, redis, minio and ingress.
+  - path: platform/argocd/helmfile.yaml.gotmpl
+  - path: platform/velero/helmfile.yaml.gotmpl
+  - path: platform/harbor/helmfile.yaml.gotmpl
+
+  # ── applications ──────────────────────────────────────────────────────────
+  # Always last: they need ingress-nginx (routing) and metrics-server (HPA).
+  # Set APP_TIER_OWNER=argocd to hand this tier to the Argo ApplicationSet
+  # instead — these releases then render with installed:false.

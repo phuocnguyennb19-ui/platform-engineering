@@ -1,0 +1,41 @@
+{{- /* Gateway API HTTPRoute (platform: kong + gateway-api). Replaces Ingress.
+       The app namespace must carry whatever label the Gateway allows for
+       attachment, or the route stays Unattached with no error on this side. */ -}}
+{{- if .Values.httpRoute.enabled }}
+apiVersion: {{ .Values.httpRoute.apiVersion }}
+kind: HTTPRoute
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+  {{- with .Values.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml (required "httpRoute.parentRefs is required when httpRoute.enabled" .Values.httpRoute.parentRefs) | nindent 4 }}
+  {{- with .Values.httpRoute.hostnames }}
+  hostnames:
+    {{- range . }}
+    - {{ tpl (toString .) $ | quote }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- if .Values.httpRoute.rules }}
+    {{- toYaml .Values.httpRoute.rules | nindent 4 }}
+    {{- else }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      {{- with .Values.httpRoute.timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ include "application.fullname" . }}
+          port: {{ .Values.service.port }}
+    {{- end }}
+{{- end }}

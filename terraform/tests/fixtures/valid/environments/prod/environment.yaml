@@ -1,0 +1,16 @@
+environment: prod
+
+account:
+  id: "222222222222"
+
+region:
+  name: ap-southeast-1
+
+name_prefix: acme
+
+tags:
+  Owner: platform-team
+
+release:
+  image_tag_source: config
+  promote_from: dev

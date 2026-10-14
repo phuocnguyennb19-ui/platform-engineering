@@ -1,0 +1,22 @@
+{{- /* VerticalPodAutoscaler — recommendation-only by default; VPA in Auto mode
+       alongside an HPA on the same resource metric fights the HPA. */ -}}
+{{- if .Values.verticalPodAutoscaler.enabled }}
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: {{ .Values.workload.kind }}
+    name: {{ include "application.fullname" . }}
+  updatePolicy:
+    updateMode: {{ .Values.verticalPodAutoscaler.updateMode }}
+  {{- with .Values.verticalPodAutoscaler.resourcePolicy }}
+  resourcePolicy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

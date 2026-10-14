@@ -1,0 +1,16 @@
+resources:
+  cpu: 512
+  memory: 1024
+
+deployment:
+  replicas: 2
+
+container:
+  health_check_command: ["CMD", "/web", "-check"]
+
+environment:
+  ENVIRONMENT: dev
+  RETRIES: 3
+
+secrets:
+  DB_PASSWORD: arn:aws:secretsmanager:ap-southeast-1:111111111111:secret:web/db-AbCdEf

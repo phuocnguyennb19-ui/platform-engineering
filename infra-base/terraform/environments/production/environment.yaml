@@ -1,0 +1,16 @@
+environment: production
+
+account:
+  id: ""
+
+region:
+  name: ap-southeast-1
+
+name_prefix: platform
+
+tags:
+  Owner: platform-team
+
+release:
+  image_tag_source: config
+  promote_from: staging

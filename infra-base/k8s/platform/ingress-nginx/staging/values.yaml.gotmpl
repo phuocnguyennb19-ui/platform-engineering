@@ -1,0 +1,14 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+controller:
+  ingressClassResource:
+    name: nginx-staging
+    controllerValue: "k8s.io/ingress-nginx-staging"
+  ingressClass: nginx-staging
+
+  replicaCount: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70

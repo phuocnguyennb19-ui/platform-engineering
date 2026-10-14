@@ -1,0 +1,30 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+shards: 2
+replicaCount: 2
+
+persistence:
+  size: 100Gi
+  {{- if (.Values.storageClass) }}
+  storageClass: {{ (.Values.storageClass) }}
+  {{- end }}
+
+resources:
+  requests: { cpu: 1, memory: 4Gi }
+  limits:   { cpu: 4, memory: 8Gi }
+
+# ── ClickHouse Keeper (Raft coordination, replaces ZooKeeper) ──
+keeper:
+  replicaCount: 3
+  persistence:
+    size: 20Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+
+podAntiAffinityPreset: hard
+pdb:
+  create: true
+
+networkPolicy:
+  enabled: true

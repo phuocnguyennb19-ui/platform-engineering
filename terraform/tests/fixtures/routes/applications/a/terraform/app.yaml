@@ -1,0 +1,11 @@
+application:
+  name: a
+
+runtime:
+  type: ecs
+
+image:
+  repository: a
+
+container:
+  port: 8080

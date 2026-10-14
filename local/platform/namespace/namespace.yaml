@@ -1,0 +1,11 @@
+# The local app namespace — same Pod Security level as dev/staging/prod
+# (k8s/platform/bootstrap/manifests/namespaces.yaml), so a pod that runs here
+# is admitted in the cloud clusters too.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

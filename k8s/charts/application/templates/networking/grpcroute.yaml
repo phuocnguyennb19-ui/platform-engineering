@@ -1,0 +1,25 @@
+{{- /* GRPCRoute — same Gateway, gRPC semantics. */ -}}
+{{- if .Values.grpcRoute.enabled }}
+apiVersion: {{ .Values.grpcRoute.apiVersion }}
+kind: GRPCRoute
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+  {{- with .Values.grpcRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml (required "grpcRoute.parentRefs is required when grpcRoute.enabled" .Values.grpcRoute.parentRefs) | nindent 4 }}
+  {{- with .Values.grpcRoute.hostnames }}
+  hostnames:
+    {{- range . }}
+    - {{ tpl (toString .) $ | quote }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- toYaml (required "grpcRoute.rules is required when grpcRoute.enabled" .Values.grpcRoute.rules) | nindent 4 }}
+{{- end }}

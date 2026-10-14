@@ -1,0 +1,6 @@
+# prod: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+replicas: 2
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

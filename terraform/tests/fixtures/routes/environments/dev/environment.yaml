@@ -1,0 +1,15 @@
+environment: dev
+
+account:
+  id: "111111111111"
+
+region:
+  name: ap-southeast-1
+
+name_prefix: acme
+
+tags:
+  Owner: platform-team
+
+release:
+  image_tag_source: pipeline

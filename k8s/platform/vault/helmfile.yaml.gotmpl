@@ -1,0 +1,32 @@
+# ============================================================
+# vault — secrets engine. Order: after cert-manager + ingress (its ingress and TLS cert need both).
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f vault/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../infra-base/k8s/env-values/environments.yaml
+  - ../../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: vault
+    namespace: vault
+    createNamespace: true
+    chart: hashicorp/vault
+    version: 0.30.0
+    missingFileHandler: Warn
+    labels: { name: vault, layer: platform, tier: infra, component: secrets, env: "{{ $env }}" }
+    values:
+      - ../../../infra-base/k8s/platform/vault/values.yaml.gotmpl
+      - ../../../infra-base/k8s/platform/vault/{{ .Environment.Name }}/values.yaml.gotmpl

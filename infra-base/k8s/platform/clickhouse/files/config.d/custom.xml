@@ -1,0 +1,64 @@
+<!-- ============================================================
+     ClickHouse — custom server overrides (mounted via extraOverrides)
+     readFile'd into values.yaml.gotmpl. Merged into config.d/. ClickHouse
+     merges <profiles>/<quotas> here too. Env-agnostic; sizing stays in values.
+     ============================================================ -->
+<clickhouse>
+  <!-- Logging: JSON to stdout for Loki/Alloy pickup -->
+  <logger>
+    <level>information</level>
+    <formatting>
+      <type>json</type>
+    </formatting>
+    <console>true</console>
+  </logger>
+
+  <!-- Concurrency / memory guardrails -->
+  <max_concurrent_queries>100</max_concurrent_queries>
+  <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+  <max_connections>1024</max_connections>
+
+  <!-- MergeTree housekeeping -->
+  <merge_tree>
+    <parts_to_delay_insert>150</parts_to_delay_insert>
+    <parts_to_throw_insert>300</parts_to_throw_insert>
+    <max_delay_to_insert>1</max_delay_to_insert>
+  </merge_tree>
+
+  <!-- Prometheus endpoint (scraped via ServiceMonitor) -->
+  <prometheus>
+    <endpoint>/metrics</endpoint>
+    <port>9363</port>
+    <metrics>true</metrics>
+    <events>true</events>
+    <asynchronous_metrics>true</asynchronous_metrics>
+  </prometheus>
+
+  <!-- Query profiles: bound resource usage per role -->
+  <profiles>
+    <default>
+      <max_memory_usage>10000000000</max_memory_usage>
+      <max_execution_time>60</max_execution_time>
+      <readonly>0</readonly>
+      <load_balancing>random</load_balancing>
+    </default>
+    <readonly>
+      <readonly>1</readonly>
+      <max_execution_time>30</max_execution_time>
+    </readonly>
+  </profiles>
+
+  <!-- Quotas: cap query volume per hour -->
+  <quotas>
+    <default>
+      <interval>
+        <duration>3600</duration>
+        <queries>0</queries>
+        <errors>0</errors>
+        <result_rows>0</result_rows>
+        <read_rows>0</read_rows>
+        <execution_time>0</execution_time>
+      </interval>
+    </default>
+  </quotas>
+</clickhouse>

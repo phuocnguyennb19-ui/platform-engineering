@@ -1,0 +1,61 @@
+vpc:
+  cidr: 10.30.0.0/16
+  az_count: 3
+  single_nat_gateway: false
+  enable_flow_logs: true
+
+ecs:
+  enabled: true
+  fargate_base: 2
+  fargate_weight: 1
+  fargate_spot_weight: 0
+  container_insights: true
+  enable_execute_command: false
+
+eks:
+  enabled: true
+  version: "1.32"
+  endpoint_public_access: false
+  node_groups:
+    default:
+      instance_types: ["m6i.large"]
+      capacity_type: ON_DEMAND
+      min_size: 3
+      max_size: 6
+      desired_size: 3
+  addon_roles:
+    external-dns:
+      service_accounts: ["infra:external-dns"]
+    cluster-autoscaler:
+      service_accounts: ["kube-system:cluster-autoscaler-aws-cluster-autoscaler"]
+    velero:
+      service_accounts: ["velero:velero-server"]
+
+sops:
+  kms_key: true
+
+alb:
+  enabled: false
+
+iam:
+  enabled: false
+
+ecr:
+  image_tag_mutability: IMMUTABLE
+  force_delete: false
+  mirror_repositories:
+    - bitnami/clickhouse
+    - bitnami/clickhouse-keeper
+    - bitnami/jmx-exporter
+    - bitnami/kafka
+    - bitnami/postgres-exporter
+    - bitnami/postgresql
+    - bitnami/redis
+    - bitnami/redis-exporter
+    - bitnami/redis-sentinel
+
+logs:
+  retention_days: 90
+
+alerts:
+  subscriptions: {}

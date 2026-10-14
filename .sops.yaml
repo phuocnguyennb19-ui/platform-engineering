@@ -1,0 +1,31 @@
+# SOPS configuration — one key per environment.
+# Docs: https://github.com/getsops/sops
+#
+# Each environment's secrets decrypt only with that environment's key, so a job
+# (or a person) holding the dev key cannot read staging or production.
+#   dev         age key   → CI variable SOPS_AGE_PRIVATE_KEY_DEV
+#   staging     age key   → CI variable SOPS_AGE_PRIVATE_KEY_STAGING (protected)
+#   production  AWS KMS   → the production deploy role (kms:Decrypt); the age key
+#               SOPS_AGE_PRIVATE_KEY_PRODUCTION (protected) is break-glass only
+#
+# REPLACE_WITH_* below must be set before those files can be (re)encrypted —
+# sops rejects the marker, so nothing is ever encrypted to a wrong or shared key.
+#   age-keygen -o staging.agekey              # public key is printed; store the private
+#                                             # key only in the protected CI variable
+#   terraform -chdir=terraform/stacks/core output sops_kms_key_arn   # production
+#   sops updatekeys infra-base/k8s/env-values/<env>/secrets.enc.yaml
+#
+# The three files were first encrypted with one shared key, so after
+# re-encrypting staging and production, rotate the secret VALUES too: the old
+# ciphertext stays readable in git history by anyone holding that key.
+
+creation_rules:
+  - path_regex: ^infra-base/k8s/env-values/dev/secrets\.enc\.yaml$
+    age: age199t5762rgtsa47yamz6ux86jpm6df95ewq5wuug9cahudgf73dmqx9dse9
+
+  - path_regex: ^infra-base/k8s/env-values/staging/secrets\.enc\.yaml$
+    age: REPLACE_WITH_STAGING_AGE_PUBLIC_KEY
+
+  - path_regex: ^infra-base/k8s/env-values/prod/secrets\.enc\.yaml$
+    kms: REPLACE_WITH_PRODUCTION_SOPS_KMS_KEY_ARN
+    age: REPLACE_WITH_PRODUCTION_AGE_PUBLIC_KEY

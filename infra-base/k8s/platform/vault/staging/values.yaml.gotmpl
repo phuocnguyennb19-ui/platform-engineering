@@ -1,0 +1,63 @@
+# staging: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+global:
+  # dev: in-cluster HTTP (no cert to manage for a throwaway env).
+  # staging/prod: TLS on, backed by the cert-manager Certificate below.
+  tlsDisable: false
+
+injector:
+  enabled: false              # Agent Injector only where apps consume it
+
+server:
+
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: 1, memory: 1Gi }
+
+  dataStorage:
+    size: 8Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+
+  # ── HA via integrated Raft storage ────────────────────────
+  ha:
+    replicas: 1
+    raft:
+      config: |
+        ui = true
+        listener "tcp" {
+          address     = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_disable        = 0
+          tls_cert_file      = "/vault/userconfig/vault-tls/tls.crt"
+          tls_key_file       = "/vault/userconfig/vault-tls/tls.key"
+          tls_client_ca_file = "/vault/userconfig/vault-tls/ca.crt"
+        }
+        storage "raft" {
+          path = "/vault/data"
+        {{- /* retry_join lets every peer find the cluster on restart. Without
+               it a multi-replica Raft cluster never forms on its own and each
+               pod has to be joined by hand after `vault operator init`. */}}
+          retry_join {
+            leader_api_addr = "https://vault-0.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/vault-tls/ca.crt"
+            leader_client_cert_file = "/vault/userconfig/vault-tls/tls.crt"
+            leader_client_key_file  = "/vault/userconfig/vault-tls/tls.key"
+          }
+        }
+        service_registration "kubernetes" {}
+        telemetry {
+          prometheus_retention_time = "30s"
+          disable_hostname = true
+        }
+  # ── TLS material from cert-manager (vault/manifests/certificate.yaml) ──
+  # `type: secret` volumes are mounted at /vault/userconfig/<name>/.
+  extraVolumes:
+    - type: secret
+      name: vault-tls
+  extraEnvironmentVars:
+    VAULT_ADDR:    https://127.0.0.1:8200
+    VAULT_CACERT:  /vault/userconfig/vault-tls/ca.crt
+    VAULT_TLSCERT: /vault/userconfig/vault-tls/tls.crt
+    VAULT_TLSKEY:  /vault/userconfig/vault-tls/tls.key

@@ -1,0 +1,167 @@
+# ============================================================
+# HELMFILE workflow — deploy INFRASTRUCTURE (selector layer=platform)
+#
+# Include from the root .gitlab-ci.yml:
+#   include: { local: ci/k8s/helmfile.yml }
+#
+# Boundary: this workflow ONLY manages infrastructure (observability, security,
+# data stores, ingress...). The app-tier is managed by Argo CD (ci/k8s/argocd.yml).
+# → selector `layer=platform` so it never touches app-tier releases.
+#
+# Trigger: changes to any tool/app values or helmfile fragment, or environments/
+# (argocd/ = Argo CD's own workflow).
+#
+# Branch → Env:  dev/develop/feature/* → dev · staging/release/* → staging
+#                main/master → prod (manual)
+#
+# CI/CD vars (group-level): AWS_REGION, DEPLOY_TOOLS_VERSION, SOPS_AGE_PRIVATE_KEY,
+#   DEV_EKS_CLUSTER, STAGING_EKS_CLUSTER, PROD_EKS_CLUSTER
+# ============================================================
+
+# ─── anchors (defined BEFORE use; file-scoped) ───
+.helmfile:
+  image: $DEPLOY_TOOLS_IMAGE
+  variables:
+    HELMFILE_DIR: "$CI_PROJECT_DIR/k8s"
+  before_script:
+    - !reference [.ci-env-select, script]
+    - !reference [.ci-aws-auth, script]
+    - !reference [.ci-eks-kubeconfig, script]
+    - !reference [.ci-sops-setup, script]
+    - cd "$HELMFILE_DIR"
+    - helmfile -e "$DEPLOY_ENV" deps
+
+# ── LINT — render every release (no cluster needed) ─────────
+.helmfile-lint-changes: &helmfile-lint-changes
+  changes:
+    - k8s/helmfile.yaml.gotmpl
+    - "infra-base/k8s/env-values/**/*"
+    - "k8s/platform/*/helmfile.yaml.gotmpl"
+    - "infra-base/k8s/platform/**/*"         # tool values: common + <env>/ (and files/)
+    - "infra-base/k8s/monitoring/**/*"
+    - "k8s/apps/*/helmfile.yaml.gotmpl"
+    - "k8s/apps/*/values.yaml.gotmpl"
+    - "k8s/apps/*/config/**/*"
+    - "k8s/apps/*/secrets.yaml.gotmpl"
+    - "monitoring/**/*"
+    # argocd/ is Argo CD's own workflow (ci/k8s/argocd.yml); */manifests/** are
+    # kubectl-applied out of band, so a helmfile pipeline cannot act on them.
+
+# One render per environment, each with only that environment's SOPS key.
+# Staging and prod keys are protected variables, so those run on protected refs.
+.helmfile-lint:
+  extends: .helmfile
+  stage: hf-lint
+  # lint only renders → no cluster access
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    - !reference [.ci-env-select, script]
+    - !reference [.ci-sops-setup, script]
+  script:
+    - helmfile -e "$DEPLOY_ENV" -l layer=platform template > /dev/null
+    - echo "[OK] infrastructure releases render cleanly for ${DEPLOY_ENV}"
+
+helmfile:lint:dev:
+  extends: .helmfile-lint
+  variables: { DEPLOY_ENV: dev }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      <<: *helmfile-lint-changes
+    - if: $CI_COMMIT_BRANCH
+      <<: *helmfile-lint-changes
+
+helmfile:lint:staging:
+  extends: .helmfile-lint
+  variables: { DEPLOY_ENV: staging }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
+      <<: *helmfile-lint-changes
+
+helmfile:lint:prod:
+  extends: .helmfile-lint
+  variables: { DEPLOY_ENV: prod }
+  # prod decrypts through KMS, which needs the deploy role
+  before_script:
+    - cd "$CI_PROJECT_DIR/k8s"
+    - !reference [.ci-env-select, script]
+    - !reference [.ci-aws-auth, script]
+    - !reference [.ci-sops-setup, script]
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
+      <<: *helmfile-lint-changes
+
+# ── DIFF — drift vs the cluster (review before sync) ────────
+.helmfile-diff:
+  extends: .helmfile
+  stage: hf-diff
+  script:
+    - helmfile -e "$DEPLOY_ENV" -l layer=platform diff --detailed-exitcode || true
+  allow_failure: true
+
+helmfile:diff:dev:
+  extends: .helmfile-diff
+  variables: { DEPLOY_ENV: dev }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH =~ /^(dev|develop|feature\/.*)$/
+      <<: *helmfile-lint-changes
+
+helmfile:diff:staging:
+  extends: .helmfile-diff
+  variables: { DEPLOY_ENV: staging }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH =~ /^(staging|release\/.*)$/
+      <<: *helmfile-lint-changes
+
+helmfile:diff:prod:
+  extends: .helmfile-diff
+  variables: { DEPLOY_ENV: prod }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/
+      <<: *helmfile-lint-changes
+
+# ── SYNC — apply infrastructure ─────────────────────────────
+.helmfile-sync:
+  extends: .helmfile
+  stage: hf-deploy
+  # never two infrastructure syncs against one cluster at once
+  resource_group: infra-$DEPLOY_ENV
+  script:
+    - !reference [.ci-config-complete, script]
+    - !reference [.ci-mirror-images, script]
+    - echo "[INFO] helmfile sync layer=platform → $DEPLOY_ENV"
+    - helmfile -e "$DEPLOY_ENV" -l layer=platform sync
+    - echo "[OK] infrastructure $DEPLOY_ENV synced"
+
+helmfile:sync:dev:
+  extends: .helmfile-sync
+  environment: { name: dev/infra }
+  variables: { DEPLOY_ENV: dev }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH =~ /^(dev|develop)$/
+      <<: *helmfile-lint-changes
+
+helmfile:sync:staging:
+  extends: .helmfile-sync
+  environment: { name: staging/infra }
+  variables: { DEPLOY_ENV: staging }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH == "staging"
+      <<: *helmfile-lint-changes
+
+helmfile:sync:prod:
+  extends: .helmfile-sync
+  environment: { name: prod/infra }
+  variables: { DEPLOY_ENV: prod }
+  rules:
+    - !reference [.k8s-guard, rules]
+    - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/
+      when: manual                       # prod always requires manual approval
+      <<: *helmfile-lint-changes

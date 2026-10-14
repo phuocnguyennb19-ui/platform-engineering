@@ -1,0 +1,31 @@
+# ============================================================
+# external-secrets — syncs Vault/SM secrets into Kubernetes Secrets. Order: after vault.
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev -f external-secrets/helmfile.yaml.gotmpl sync
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../infra-base/k8s/env-values/environments.yaml
+  - ../../../infra-base/k8s/env-values/repositories.yaml
+environments:
+  dev:     { secrets: [ ../../../infra-base/k8s/env-values/dev/secrets.enc.yaml ] }
+  staging: { secrets: [ ../../../infra-base/k8s/env-values/staging/secrets.enc.yaml ] }
+  prod:    { secrets: [ ../../../infra-base/k8s/env-values/prod/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: external-secrets
+    namespace: infra
+    chart: external-secrets/external-secrets
+    version: 2.8.0
+    missingFileHandler: Warn
+    labels: { name: external-secrets, layer: platform, tier: infra, component: secrets, env: "{{ $env }}" }
+    values:
+      - ../../../infra-base/k8s/platform/external-secrets/values.yaml.gotmpl
+      - ../../../infra-base/k8s/platform/external-secrets/{{ .Environment.Name }}/values.yaml.gotmpl

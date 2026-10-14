@@ -1,0 +1,40 @@
+# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
+
+configs:
+  cm:
+    # ── Local admin account ──────────────────────────────────────────────
+    # Enabled in dev/staging for convenience. DISABLED in prod: the built-in
+    # admin is a shared, non-attributable, non-revocable credential with full
+    # cluster-admin reach through Argo, and it bypasses the SSO audit trail.
+    #
+    # ⚠ Configure SSO (dex.config / oidc.config) BEFORE the first prod sync —
+    #   with admin disabled and no SSO configured, nobody can log in. Recover
+    #   by flipping this back to "true" and restarting argocd-server.
+    admin.enabled: "true"
+  # Registers this cluster under its environment. The platform-apps ApplicationSet
+  # generates Applications only for the environment of the cluster it runs in,
+  # so one cluster never deploys another environment's apps.
+  clusterCredentials:
+    in-cluster:
+      labels:
+        platform.example.com/environment: "dev"
+        platform.example.com/auto-sync: "true"
+
+repoServer:
+  replicas: 1
+
+server:
+  replicas: 1
+  ingress:
+    ingressClassName: nginx-dev
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-staging
+
+applicationSet:
+  replicas: 1
+
+# Prod: Redis HA (3 nodes + sentinel). Dev/staging: standalone redis.
+redis:
+  enabled: true
+redis-ha:
+  enabled: false

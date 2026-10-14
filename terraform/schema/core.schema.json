@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "infra-base/terraform/environments/<env>/core.yaml",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "vpc",
+    "ecs",
+    "eks"
+  ],
+  "properties": {
+    "vpc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cidr"
+      ],
+      "properties": {
+        "cidr": {
+          "type": "string",
+          "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$"
+        },
+        "az_count": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 6
+        },
+        "azs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2
+        },
+        "single_nat_gateway": {
+          "type": "boolean"
+        },
+        "enable_flow_logs": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ecs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "fargate_base": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fargate_weight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fargate_spot_weight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "container_insights": {
+          "type": "boolean"
+        },
+        "enable_execute_command": {
+          "type": "boolean"
+        }
+      }
+    },
+    "eks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^1\\.[0-9]{2}$"
+        },
+        "endpoint_public_access": {
+          "type": "boolean"
+        },
+        "node_groups": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "instance_types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "capacity_type": {
+                "enum": [
+                  "ON_DEMAND",
+                  "SPOT"
+                ]
+              },
+              "min_size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "desired_size": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "access_entries": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "principal_arn"
+            ],
+            "properties": {
+              "principal_arn": {
+                "type": "string",
+                "pattern": "^arn:aws[a-z-]*:iam::[0-9]{12}:(role|user)/.+$"
+              },
+              "type": {
+                "type": "string"
+              },
+              "kubernetes_groups": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "policy_associations": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "addon_roles": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "external-dns",
+              "cluster-autoscaler",
+              "velero"
+            ]
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "service_accounts"
+            ],
+            "properties": {
+              "service_accounts": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9-]+:[a-z0-9-]+$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "alb": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "internal": {
+          "type": "boolean"
+        },
+        "deletion_protection": {
+          "type": "boolean"
+        },
+        "ingress_cidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "target_port_range": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "from",
+            "to"
+          ],
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        }
+      }
+    },
+    "iam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ec2_instance_role": {
+          "type": "boolean"
+        },
+        "rds_monitoring_role": {
+          "type": "boolean"
+        }
+      }
+    },
+    "dns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zone_name"
+      ],
+      "properties": {
+        "zone_name": {
+          "type": "string",
+          "minLength": 3
+        },
+        "create_zone": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ecr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image_tag_mutability": {
+          "const": "IMMUTABLE"
+        },
+        "force_delete": {
+          "type": "boolean"
+        },
+        "mirror_repositories": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
+          }
+        }
+      }
+    },
+    "logs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "retention_days": {
+          "enum": [
+            1,
+            3,
+            5,
+            7,
+            14,
+            30,
+            60,
+            90,
+            120,
+            150,
+            180,
+            365,
+            400,
+            545,
+            731,
+            1096,
+            1827,
+            2192,
+            2557,
+            2922,
+            3288,
+            3653
+          ]
+        }
+      }
+    },
+    "alerts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "subscriptions": {
+          "type": "object"
+        }
+      }
+    },
+    "sops": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kms_key": {
+          "type": "boolean"
+        },
+        "key_user_arns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^arn:aws[a-z-]*:iam::[0-9]{12}:(role|user)/.+$"
+          }
+        }
+      }
+    }
+  }
+}

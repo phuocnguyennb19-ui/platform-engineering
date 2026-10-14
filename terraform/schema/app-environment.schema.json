@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "applications/<app>/terraform/<environment>.yaml",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "runtime": {
+      "$ref": "app.schema.json#/$defs/runtime"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tag": {
+          "$ref": "app.schema.json#/$defs/tag"
+        }
+      }
+    },
+    "container": {
+      "$ref": "app.schema.json#/$defs/container"
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu",
+        "memory"
+      ],
+      "properties": {
+        "cpu": {
+          "type": "integer",
+          "minimum": 64
+        },
+        "memory": {
+          "type": "integer",
+          "minimum": 64
+        }
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "replicas"
+      ],
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "autoscaling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "min",
+            "max"
+          ],
+          "properties": {
+            "min": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^arn:aws[a-z-]*:(secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+|ssm:[a-z0-9-]+:[0-9]{12}:parameter/.+)$"
+      }
+    },
+    "network": {
+      "$ref": "app.schema.json#/$defs/network"
+    }
+  }
+}

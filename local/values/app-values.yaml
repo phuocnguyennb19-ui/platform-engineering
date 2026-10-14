@@ -1,0 +1,25 @@
+# ============================================================
+# Local environment layer for charts/application — the local counterpart of
+# infra-base/k8s/env-values/<env>/app-values.yaml.gotmpl, loaded by every local/apps/<app>
+# release in its place. No cloud dependency: no ECR (each app's
+# values.yaml.gotmpl names its registry), no cert-manager/external-dns, no TLS.
+# ============================================================
+global:
+  imageRegistry: ""
+
+replicaCount: 1
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false
+
+# minikube `ingress` addon: IngressClass `nginx`, controller in ns ingress-nginx.
+ingress:
+  enabled: true
+  className: nginx
+
+networkPolicy:
+  ingress:
+    fromIngressNamespace: ingress-nginx

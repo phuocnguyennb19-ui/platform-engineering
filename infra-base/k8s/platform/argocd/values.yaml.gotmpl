@@ -1,0 +1,74 @@
+# ============================================================
+# Argo CD — GitOps Continuous Delivery Values Template
+# ============================================================
+
+global:
+  domain: argocd.{{ .Values.ingressDomain }}
+
+configs:
+  params:
+    # TLS terminated at ingress -> run server in insecure (HTTP) mode behind it.
+    server.insecure: true
+  cm:
+    exec.enabled: "false"
+    application.instanceLabelKey: argocd.argoproj.io/instance
+  # Registers this cluster under its environment. The platform-apps ApplicationSet
+  # generates Applications only for the environment of the cluster it runs in,
+  # so one cluster never deploys another environment's apps.
+  clusterCredentials:
+    in-cluster:
+      server: https://kubernetes.default.svc
+      config: {}
+
+# secret-init Job creates the argocd-redis Secret (auth). Enable when registry egress is OK.
+# Only disable when the network blocks quay.io → then create the argocd-redis secret manually:
+#   kubectl -n infra create secret generic argocd-redis --from-literal=auth=$(openssl rand -base64 24)
+redisSecretInit:
+  enabled: true
+
+# Application controller — keep 1 replica unless sharding is enabled.
+controller:
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1", memory: 1Gi }
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+repoServer:
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+server:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  ingress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: HTTP
+    hostname: argocd.{{ .Values.ingressDomain }}
+    tls: true
+
+applicationSet:
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+notifications:
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true

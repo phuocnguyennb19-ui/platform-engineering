@@ -1,0 +1,490 @@
+# ============================================================
+# Reusable CI/CD template for source code repositories (AWS EKS)
+#
+# Include in your service repo's .gitlab-ci.yml:
+#
+#   include:
+#     - project: 'myorg/<platform-repo>'
+#       ref: main
+#       file: 'ci/deploy-template.gitlab-ci.yml'
+#
+# Required CI/CD variables (set at group level):
+#   DEV_AWS_ACCOUNT_ID, STAGING_AWS_ACCOUNT_ID, PRODUCTION_AWS_ACCOUNT_ID
+#                           each job assumes gitlab-deploy-<env> there with its GitLab
+#                           OIDC token (the role must trust this project); no AWS keys
+#   HELM_PROJECT_ID         GitLab project ID of the platform repository
+#   HELM_TRIGGER_TOKEN      Pipeline trigger token from the platform repository
+#   (images are pushed to the dev account's ECR; staging/prod receive them by digest
+#    promotion in the platform deploy pipeline)
+#   DEPLOY_TOOLS_IMAGE      Image with kubectl + aws-cli + helm (built from ci/images/Dockerfile)
+#   CI_IMAGE                Go CI image with golangci-lint + gitleaks (built from ci/images/Dockerfile.ci)
+#   DEV_EKS_CLUSTER, STAGING_EKS_CLUSTER, PRODUCTION_EKS_CLUSTER
+#                           default to terraform/stacks/core's platform-<env>-eks names
+#
+# Optional per-repo variables:
+#   SERVICE_NAME            Defaults to $CI_PROJECT_NAME
+#   MIGRATION_ENABLED       "true" if the service has DB migrations (default: "false")
+#   MIGRATION_COMMAND       Command to run for migration (default: "./app migrate --up")
+#   MIGRATION_TIMEOUT       Seconds to wait for migration job (default: 300)
+#
+# Branch → Environment mapping:
+#   develop / dev / feature/*   → dev
+#   staging / release/*         → staging
+#   main / master               → prod  (manual approval required)
+# ============================================================
+
+stages:
+  - scan
+  - build
+  - test
+  - promote
+  - migrate
+  - deploy
+
+variables:
+  AWS_REGION: "ap-southeast-1"
+  SERVICE_NAME: $CI_PROJECT_NAME
+  MIGRATION_ENABLED: "false"
+  MIGRATION_COMMAND: "./app migrate --up"
+  MIGRATION_TIMEOUT: "300"
+  DEV_EKS_CLUSTER: "platform-dev-eks"
+  STAGING_EKS_CLUSTER: "platform-staging-eks"
+  PRODUCTION_EKS_CLUSTER: "platform-production-eks"
+
+# ─── AWS helpers (reused in build and migrate) ──────────────
+# DEPLOY_ENV is matched against a fixed list, never evaluated.
+.env-select: &env-select |
+  case "${DEPLOY_ENV:-}" in
+    dev)     AWS_ACCOUNT_ID="${DEV_AWS_ACCOUNT_ID:-}";        EKS_CLUSTER="$DEV_EKS_CLUSTER" ;;
+    staging) AWS_ACCOUNT_ID="${STAGING_AWS_ACCOUNT_ID:-}";    EKS_CLUSTER="$STAGING_EKS_CLUSTER" ;;
+    prod)    AWS_ACCOUNT_ID="${PRODUCTION_AWS_ACCOUNT_ID:-}"; EKS_CLUSTER="$PRODUCTION_EKS_CLUSTER" ;;
+    *) echo "[ERROR] DEPLOY_ENV must be dev, staging or prod"; exit 1 ;;
+  esac
+  echo "$AWS_ACCOUNT_ID" | grep -qE '^[0-9]{12}$' || { echo "[ERROR] set the AWS account ID variable for ${DEPLOY_ENV}"; exit 1; }
+  export AWS_ACCOUNT_ID EKS_CLUSTER
+
+.aws-auth: &aws-auth |
+  printf '%s' "$AWS_OIDC_TOKEN" > "${CI_PROJECT_DIR}/.aws-web-identity-token"
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
+  export AWS_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/gitlab-deploy-${DEPLOY_ENV}"
+  export AWS_WEB_IDENTITY_TOKEN_FILE="${CI_PROJECT_DIR}/.aws-web-identity-token"
+  export AWS_ROLE_SESSION_NAME="gitlab-${CI_PROJECT_ID}-${CI_JOB_ID}"
+  [ "$(aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID" ] || { echo "[ERROR] OIDC role is not in account ${AWS_ACCOUNT_ID}"; exit 1; }
+
+.eks-kubeconfig: &eks-kubeconfig |
+  aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+.aws-oidc:
+  id_tokens:
+    AWS_OIDC_TOKEN:
+      aud: $CI_SERVER_URL
+
+# ============================================================
+# STAGE 1 — SCAN
+# ============================================================
+
+# Secret scanning — uses the CI image (bundles gitleaks)
+# Or use a standalone image if you don't want to pull the CI image at this stage.
+scan:secrets:
+  stage: scan
+  image: $CI_IMAGE
+  script:
+    - gitleaks detect --source . --redact --verbose --no-git
+  allow_failure: false
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# Dockerfile linting — uses the CI image (bundles hadolint)
+scan:lint:
+  stage: scan
+  image: $CI_IMAGE
+  script:
+    - hadolint Dockerfile
+  allow_failure: true   # advisory — fix warnings over time
+  rules:
+    - if: $CI_COMMIT_BRANCH
+      exists:
+        - Dockerfile
+
+# Go lint — uses the CI image (bundles golangci-lint)
+scan:golint:
+  stage: scan
+  image: $CI_IMAGE
+  needs: []
+  script:
+    - golangci-lint run --timeout 5m ./...
+  allow_failure: true
+  cache:
+    key: golangci-$CI_COMMIT_REF_SLUG
+    paths:
+      - .golangci-cache/
+  variables:
+    GOLANGCI_LINT_CACHE: $CI_PROJECT_DIR/.golangci-cache
+  rules:
+    - if: $CI_COMMIT_BRANCH
+      exists:
+        - go.mod
+
+# ============================================================
+# STAGE 2 — BUILD & PUSH
+# ============================================================
+
+build:image:
+  extends: .aws-oidc
+  stage: build
+  # The runner uses a Docker socket mount (not DinD) → no privileged needed.
+  # DEPLOY_TOOLS_IMAGE has docker-cli + aws-cli, pulled from the runner host.
+  image: $DEPLOY_TOOLS_IMAGE
+  variables:
+    DOCKER_HOST: "unix:///var/run/docker.sock"
+    DOCKER_BUILDKIT: "1"
+    DEPLOY_ENV: dev
+  before_script:
+    - *env-select
+    - *aws-auth
+    - export IMAGE_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    - aws ecr get-login-password --region $AWS_REGION
+        | docker login --username AWS --password-stdin $IMAGE_REGISTRY
+  script:
+    - |
+      IMAGE="${IMAGE_REGISTRY}/${SERVICE_NAME}"
+      BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      docker build \
+        --build-arg BUILD_DATE="${BUILD_DATE}" \
+        --build-arg GIT_COMMIT="${CI_COMMIT_SHA}" \
+        --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}" \
+        --label "org.opencontainers.image.source=${CI_PROJECT_URL}" \
+        --label "org.opencontainers.image.created=${BUILD_DATE}" \
+        -t "${IMAGE}:${CI_COMMIT_SHORT_SHA}" \
+        .
+
+      docker push "${IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      # ECR repositories are IMMUTABLE (terraform/stacks/registry), so
+      # only the commit tag is pushed; a branch tag could never be updated.
+
+      echo "IMAGE_TAG=${CI_COMMIT_SHORT_SHA}" >> build.env
+      echo "IMAGE_FULL=${IMAGE}:${CI_COMMIT_SHORT_SHA}" >> build.env
+
+      echo "Pushed: ${IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  artifacts:
+    reports:
+      dotenv: build.env
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# ============================================================
+# STAGE 3 — TEST
+# ============================================================
+
+# Override this job in your service's .gitlab-ci.yml to run real tests.
+# CI_IMAGE already has golang + tools — no separate image pull needed.
+#
+# Example override:
+#   test:unit:
+#     script:
+#       - go test ./... -race -coverprofile=coverage.out
+#       - go tool cover -func=coverage.out
+test:unit:
+  stage: test
+  image: $CI_IMAGE
+  needs: []   # parallel with build:image — no image artifact needed
+  cache:
+    key: gomod-$CI_COMMIT_REF_SLUG
+    paths:
+      - /go/pkg/mod/
+  script:
+    - echo "[WARN] test:unit not overridden — no tests ran"
+    - echo "Override this job in your .gitlab-ci.yml to run your test suite"
+  allow_failure: false
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# ============================================================
+# STAGE 4 — MIGRATE
+# Runs a one-off Kubernetes Job using the newly built image.
+# Only executes when MIGRATION_ENABLED="true".
+# The Job completes before the rolling deploy begins — guarantees
+# schema is up-to-date before new pods start.
+# ============================================================
+
+.migrate-base:
+  extends: .aws-oidc
+  stage: migrate
+  image: $DEPLOY_TOOLS_IMAGE
+  needs:
+    - job: build:image
+      artifacts: true
+  before_script:
+    - *env-select
+    - *aws-auth
+    - *eks-kubeconfig
+    # each cluster pulls only from its own account's ECR
+    - export IMAGE_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  script:
+    - |
+      JOB_NAME="migrate-${SERVICE_NAME}-${CI_COMMIT_SHORT_SHA}"
+      NAMESPACE="${DEPLOY_ENV}"
+      # Object names follow the chart's application.fullname: the release name,
+      # suffixed with the chart name unless it already contains it, max 63 chars.
+      case "$SERVICE_NAME" in
+        *application*) FULLNAME="$SERVICE_NAME" ;;
+        *)             FULLNAME="${SERVICE_NAME}-application" ;;
+      esac
+      trunc63() { printf '%s' "$1" | cut -c1-63 | sed 's/-*$//'; }
+      FULLNAME="$(trunc63 "$FULLNAME")"
+      CONFIGMAP_NAME="$(trunc63 "${FULLNAME}-config")"
+      SECRET_NAME="$(trunc63 "${FULLNAME}-secret")"
+
+      echo "[INFO] Running migration job: ${JOB_NAME}"
+      echo "[INFO] Image : ${IMAGE_REGISTRY}/${SERVICE_NAME}:${IMAGE_TAG}"
+      echo "[INFO] Command: ${MIGRATION_COMMAND}"
+
+      kubectl apply -f - <<EOF
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: "${JOB_NAME}"
+        namespace: "${NAMESPACE}"
+        labels:
+          app.kubernetes.io/instance: "${SERVICE_NAME}"
+          app.kubernetes.io/component: migration
+          ci-pipeline: "${CI_PIPELINE_ID}"
+      spec:
+        backoffLimit: 0
+        activeDeadlineSeconds: ${MIGRATION_TIMEOUT}
+        ttlSecondsAfterFinished: 600
+        template:
+          spec:
+            restartPolicy: Never
+            serviceAccountName: "${FULLNAME}"
+            # The app namespaces enforce Pod Security "restricted"
+            # (platform/bootstrap/manifests/namespaces.yaml).
+            securityContext:
+              runAsNonRoot: true
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: migration
+                image: "${IMAGE_REGISTRY}/${SERVICE_NAME}:${IMAGE_TAG}"
+                command: ["/bin/sh", "-c", "${MIGRATION_COMMAND}"]
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+                envFrom:
+                  - configMapRef:
+                      name: "${CONFIGMAP_NAME}"
+                      optional: true
+                  - secretRef:
+                      name: "${SECRET_NAME}"
+                      optional: true
+                  # App secret created by ESO/SealedSecrets, the one the app pods
+                  # load through extraEnvFrom (applications/<app>/k8s/values.yaml).
+                  - secretRef:
+                      name: "${SERVICE_NAME}"
+                      optional: true
+      EOF
+
+      # Wait for the Job to complete
+      echo "[INFO] Waiting for migration to complete (timeout: ${MIGRATION_TIMEOUT}s)..."
+      kubectl wait job/${JOB_NAME} \
+        -n ${NAMESPACE} \
+        --for=condition=Complete \
+        --timeout=${MIGRATION_TIMEOUT}s
+
+      # Print logs before cleanup
+      echo "[INFO] Migration logs:"
+      kubectl logs -l job-name=${JOB_NAME} -n ${NAMESPACE} --tail=200 || true
+
+      echo "[INFO] Migration complete"
+
+# ============================================================
+# STAGE — PROMOTE (copy by digest into the target environment's ECR)
+# Follows the terraform/environments chain: dev → staging → production. The
+# target account may pull only from the environment before it, so a prod
+# deploy needs the same commit to have been promoted to staging first
+# (fast-forward staging → main keeps the SHA).
+# ============================================================
+.promote-base:
+  extends: .aws-oidc
+  stage: promote
+  image: $DEPLOY_TOOLS_IMAGE
+  needs:
+    - job: build:image
+      artifacts: true
+  variables:
+    CRANE_VERSION: v0.22.1
+    CRANE_SHA256_X86_64: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+    CRANE_SHA256_ARM64: 898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110
+  before_script:
+    - *env-select
+    - *aws-auth
+  script:
+    - |
+      set -eu
+      case "$DEPLOY_ENV" in
+        staging) SOURCE_ACCOUNT="${DEV_AWS_ACCOUNT_ID:-}" ;;
+        prod)    SOURCE_ACCOUNT="${STAGING_AWS_ACCOUNT_ID:-}" ;;
+        *) echo "[ERROR] nothing promotes into ${DEPLOY_ENV}"; exit 1 ;;
+      esac
+      echo "$SOURCE_ACCOUNT" | grep -qE '^[0-9]{12}$' || { echo "[ERROR] source account ID is not set"; exit 1; }
+      case "$(uname -m)" in
+        x86_64) CRANE_ARCH=x86_64; CRANE_SHA256="$CRANE_SHA256_X86_64" ;;
+        aarch64|arm64) CRANE_ARCH=arm64; CRANE_SHA256="$CRANE_SHA256_ARM64" ;;
+        *) echo "[ERROR] no pinned crane build for $(uname -m)"; exit 1 ;;
+      esac
+      curl -fsSL -o /tmp/crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz"
+      echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c -
+      tar -xzf /tmp/crane.tar.gz -C /tmp crane
+      SRC="${SOURCE_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${SERVICE_NAME}"
+      DST="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${SERVICE_NAME}"
+      aws ecr get-login-password --region "$AWS_REGION" | /tmp/crane auth login "${SOURCE_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com" -u AWS --password-stdin
+      aws ecr get-login-password --region "$AWS_REGION" | /tmp/crane auth login "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" -u AWS --password-stdin
+      DIGEST="$(/tmp/crane digest "${SRC}:${IMAGE_TAG}")"
+      if CURRENT="$(/tmp/crane digest "${DST}:${IMAGE_TAG}" 2>/dev/null)"; then
+        [ "$CURRENT" = "$DIGEST" ] || { echo "[ERROR] ${DST}:${IMAGE_TAG} already holds ${CURRENT}, source holds ${DIGEST}"; exit 1; }
+        echo "[OK] already promoted: ${SERVICE_NAME}:${IMAGE_TAG}@${DIGEST}"
+      else
+        /tmp/crane copy "${SRC}@${DIGEST}" "${DST}:${IMAGE_TAG}"
+        echo "[OK] promoted ${SERVICE_NAME}:${IMAGE_TAG}@${DIGEST} into ${DEPLOY_ENV}"
+      fi
+
+promote:staging:
+  extends: .promote-base
+  variables:
+    DEPLOY_ENV: staging
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(staging|release\/.*)$/
+
+promote:prod:
+  extends: .promote-base
+  variables:
+    DEPLOY_ENV: prod
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/
+      when: manual
+
+migrate:dev:
+  extends: .migrate-base
+  variables:
+    DEPLOY_ENV: dev
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(dev|develop|feature\/.*)$/ && $MIGRATION_ENABLED == "true"
+
+migrate:staging:
+  extends: .migrate-base
+  needs:
+    - job: build:image
+      artifacts: true
+    - job: promote:staging
+  variables:
+    DEPLOY_ENV: staging
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(staging|release\/.*)$/ && $MIGRATION_ENABLED == "true"
+
+migrate:prod:
+  extends: .migrate-base
+  needs:
+    - job: build:image
+      artifacts: true
+    - job: promote:prod
+  variables:
+    DEPLOY_ENV: prod
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/ && $MIGRATION_ENABLED == "true"
+      when: manual
+
+# ============================================================
+# STAGE 5 — DEPLOY
+# Triggers the platform repository pipeline via pipeline trigger API.
+# ============================================================
+
+.trigger-deploy:
+  stage: deploy
+  image: curlimages/curl:8.8.0
+  needs:
+    - job: build:image
+      artifacts: true
+    - job: test:unit
+  script:
+    - |
+      echo "=== Triggering deploy ==="
+      echo "  Service           : ${SERVICE_NAME}"
+      echo "  Env               : ${DEPLOY_ENV}"
+      echo "  Tag               : ${IMAGE_TAG}"
+      echo "  Migration enabled : ${MIGRATION_ENABLED}"
+
+      HTTP_STATUS=$(curl --silent --output /tmp/trigger_response.json \
+        --write-out "%{http_code}" \
+        --request POST \
+        --form token="${HELM_TRIGGER_TOKEN}" \
+        --form ref=main \
+        --form "variables[SERVICE_NAME]=${SERVICE_NAME}" \
+        --form "variables[IMAGE_TAG]=${IMAGE_TAG}" \
+        --form "variables[DEPLOY_ENV]=${DEPLOY_ENV}" \
+        --form "variables[MIGRATION_ENABLED]=false" \
+        "${CI_API_V4_URL}/projects/${HELM_PROJECT_ID}/trigger/pipeline")
+
+      cat /tmp/trigger_response.json
+      echo ""
+
+      if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+        echo "[ERROR] Trigger failed with HTTP ${HTTP_STATUS}"
+        exit 1
+      fi
+
+      PIPELINE_URL=$(cat /tmp/trigger_response.json | grep -o '"web_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+      echo "[INFO] Deploy pipeline: ${PIPELINE_URL}"
+
+deploy:dev:
+  extends: .trigger-deploy
+  variables:
+    DEPLOY_ENV: dev
+  environment:
+    name: dev/$SERVICE_NAME
+    url: https://$SERVICE_NAME.dev.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(dev|develop|feature\/.*)$/
+      needs:
+        - job: build:image
+          artifacts: true
+        - job: test:unit
+        - job: migrate:dev
+          optional: true
+
+deploy:staging:
+  extends: .trigger-deploy
+  variables:
+    DEPLOY_ENV: staging
+  environment:
+    name: staging/$SERVICE_NAME
+    url: https://$SERVICE_NAME.staging.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(staging|release\/.*)$/
+      needs:
+        - job: build:image
+          artifacts: true
+        - job: test:unit
+        - job: promote:staging
+        - job: migrate:staging
+          optional: true
+
+deploy:prod:
+  extends: .trigger-deploy
+  variables:
+    DEPLOY_ENV: prod
+  environment:
+    name: prod/$SERVICE_NAME
+    url: https://$SERVICE_NAME.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/
+      when: manual
+      needs:
+        - job: build:image
+          artifacts: true
+        - job: test:unit
+        - job: promote:prod
+        - job: migrate:prod
+          optional: true

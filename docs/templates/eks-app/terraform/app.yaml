@@ -1,0 +1,11 @@
+application:
+  name: __APP__
+
+runtime:
+  type: eks
+
+image:
+  repository: __APP__
+
+container:
+  port: 8080

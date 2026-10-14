@@ -1,0 +1,53 @@
+{
+  // Helmfile Go-templated YAML (*.gotmpl): associate with the Helm language so
+  // {{ ... }} / {{- ... -}} template blocks don't raise YAML syntax errors.
+  // If the Helm extension (see extensions.json) isn't installed, VS Code falls
+  // back to plaintext — still no false YAML errors.
+  "files.associations": {
+    "*.gotmpl": "helm",
+    "*.yaml.gotmpl": "helm",
+    // Plain YAML (no Go template) — every one of these is applied with kubectl
+    // or read as data, never rendered by helm, so keep real YAML validation on.
+    "*/manifests/**/*.yaml": "yaml",
+    "*/config/*.yaml": "yaml",
+    "infra-base/k8s/env-values/**/*.yaml": "yaml",
+    "argocd/**/*.yaml": "yaml",
+    "applications/**/*.yaml": "yaml",
+    "docs/templates/**/*.yaml": "yaml"
+  },
+  // The redhat YAML extension only validates files whose language id is "yaml";
+  // associating templates to "helm" above already excludes them. Keep real YAML
+  // validation on for everything else.
+  "yaml.validate": true,
+  "yaml.schemas": {
+    "kubernetes": [
+      "*/manifests/**/*.yaml",
+      "bootstrap/manifests/*.yaml",
+      "argocd/**/*.yaml"
+    ],
+    // Application files: completion, hover and type/enum/typo checks while typing.
+    // The chart schema is used without `required` (generated, make docs-reference),
+    // because each file is one layer and the other layers supply the rest.
+    "./docs/schemas/application-values.overlay.schema.json": [
+      "applications/*/k8s/values.yaml",
+      "applications/*/k8s/*/values.yaml",
+      "docs/templates/eks-app/k8s/values.yaml",
+      "docs/templates/eks-app/k8s/*/values.yaml"
+    ],
+    "./terraform/schema/app.schema.json": [
+      "applications/*/terraform/app.yaml",
+      "docs/templates/*/terraform/app.yaml"
+    ],
+    "./terraform/schema/app-environment.schema.json": [
+      "applications/*/terraform/dev.yaml",
+      "applications/*/terraform/staging.yaml",
+      "applications/*/terraform/production.yaml",
+      "docs/templates/*/terraform/dev.yaml",
+      "docs/templates/*/terraform/staging.yaml",
+      "docs/templates/*/terraform/production.yaml"
+    ]
+  },
+  "files.exclude": {
+    "**/.DS_Store": true
+  }
+}

@@ -1,0 +1,65 @@
+# Nhiều worker + nhiều cronjob trong một release: kiểm tra mỗi entry sinh ra
+# object riêng, enabled:false thì bỏ qua, và tên không đụng nhau.
+
+image: { repository: be-order, tag: "1.4.0" }
+service: { port: 80, targetPort: 8080 }
+env: { APP_ENV: prod, DB_HOST: postgresql.database.svc }
+extraEnvFrom:
+  - secretRef: { name: be-order }
+probes:
+  readiness: { httpGet: { path: /readyz, port: http } }
+resources:
+  requests: { cpu: 200m, memory: 256Mi }
+  limits:   { memory: 512Mi }
+
+workers:
+  - name: kafka-consumer
+    enabled: true
+    command: ["./app"]
+    args: ["worker", "--topic=orders"]
+    env: { WORKER_ROLE: consumer }
+    extraPorts: [ { name: metrics, containerPort: 9090 } ]
+    service:        { enabled: true }
+    serviceMonitor: { enabled: true, port: metrics }
+    keda:
+      enabled: true
+      minReplicaCount: 2
+      maxReplicaCount: 20
+      triggers:
+        - type: kafka
+          metadata: { bootstrapServers: "kafka:9092", consumerGroup: orders, topic: orders, lagThreshold: "50" }
+
+  - name: payout-scheduler
+    enabled: true
+    replicaCount: 1
+    command: ["./app"]
+    args: ["worker", "--queue=payout"]
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits:   { memory: 2Gi }
+    podDisruptionBudget: { enabled: true, maxUnavailable: 1 }
+
+  - name: legacy-sync
+    enabled: false           # giữ định nghĩa, không deploy
+    command: ["./app"]
+    args: ["worker", "--legacy"]
+
+cronjobs:
+  - name: nightly-report
+    enabled: true
+    schedule: "0 2 * * *"
+    command: ["./app"]
+    args: ["report", "--daily"]
+    resources: { requests: { cpu: 1, memory: 2Gi }, limits: { memory: 4Gi } }
+
+  - name: cleanup-tmp
+    enabled: true
+    schedule: "*/30 * * * *"
+    command: ["./app"]
+    args: ["cleanup"]
+    concurrencyPolicy: Replace
+    timeZone: "Etc/UTC"      # override default Asia/Ho_Chi_Minh
+
+  - name: reindex
+    enabled: false
+    schedule: "0 4 * * 0"

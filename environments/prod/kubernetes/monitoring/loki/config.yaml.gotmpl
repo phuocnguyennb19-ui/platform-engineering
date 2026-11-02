@@ -1,0 +1,63 @@
+# ============================================================
+# Loki — server config (schema / limits / compactor / storage / ruler)
+# Merged into the release on top of values.yaml.gotmpl (which owns the
+# deployment topology: mode, replicas, persistence, gateway).
+# ============================================================
+
+loki:
+  auth_enabled: false        # single-tenant; front with mTLS/authproxy if multi-tenant
+
+  limits_config:
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    max_cache_freshness_per_query: 10m
+    split_queries_by_interval: 15m
+    ingestion_rate_mb: 10
+    ingestion_burst_size_mb: 20
+    volume_enabled: true
+    # Per-stream / query guardrails (tune per tenant scale).
+    max_query_series: 5000
+    max_query_parallelism: 32
+    max_streams_per_user: 0          # 0 = unlimited (single-tenant)
+    retention_period: 720h
+
+  compactor:
+    retention_enabled: true
+    compaction_interval: 10m
+    retention_delete_delay: 2h
+    delete_request_store: s3
+
+  # Ruler — evaluate LogQL alerting/recording rules and push to Alertmanager.
+  # Rules are loaded from ConfigMaps by the chart's sidecar (see values).
+  rulerConfig:
+    alertmanager_url: http://kube-prometheus-stack-alertmanager.{{ .Values.namespace }}.svc.{{ .Values.clusterDomain }}:9093
+    enable_alertmanager_v2: true
+    enable_api: true
+
+  podAnnotations:
+    prometheus.io/scrape: "true"
+
+  commonConfig:
+    replication_factor: 3
+
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  # ── Object store (prod) — buckets provisioned out-of-band (Terraform) ──
+  storage:
+    type: s3
+    bucketNames:
+      chunks: loki-chunks-prod
+      ruler: loki-ruler-prod
+      admin: loki-admin-prod
+    s3:
+      region: ap-southeast-1
+      endpoint: null              # non-null only for S3-compatible (MinIO/Ceph)
+      # Prefer IRSA (serviceAccount annotation in values.yaml.gotmpl) over
+      # static keys; only inject accessKeyId/secretAccessKey via SOPS if needed.

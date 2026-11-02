@@ -1,0 +1,107 @@
+# ============================================================
+# ClickHouse — OLAP / analytics columnar store
+# Chart: bitnami/clickhouse · ns `database`
+#
+# Topology:
+#   dev/staging → 1 shard × 1 replica, keeper embedded (1 node)
+#   prod        → 2 shards × 2 replicas + 3-node ClickHouse Keeper (HA)
+#
+# ⚠ Bitnami image caveat — mirror via Harbor in prod (see postgresql/README).
+#
+# Secrets (SOPS → .Values.secrets.clickhouse.password) → default admin user.
+#
+# What lives where:
+#   values.yaml.gotmpl → shards/replicas, keeper, sizing, metrics
+#   Secret (SOPS)      → admin password (existingSecret)
+#   files/            → extra XML config via `extraOverrides` / configd files
+#
+# For large multi-tenant analytics prod, graduate to the Altinity operator.
+# ============================================================
+
+fullnameOverride: clickhouse
+
+global:
+  imageRegistry: {{ printf "%s.dkr.ecr.%s.amazonaws.com" (requiredEnv "AWS_ACCOUNT_ID") (env "AWS_REGION" | default "ap-southeast-1") | quote }}   # ECR mirror, filled by images:mirror
+  security:
+    # The chart rejects any registry but docker.io; the mirror holds the same
+    # bitnamilegacy images, copied by digest. This disables only that origin check.
+    allowInsecureImages: true
+
+auth:
+  username: admin
+  existingSecret: clickhouse
+  existingSecretKey: admin-password
+
+# ── Custom server config: mounted as ConfigMap from files/config.d ──
+# XML overrides (logging, profiles, quotas, prometheus) live in
+# files/config.d/custom.xml; readFile keeps it the source of truth and the
+# chart mounts it into /etc/clickhouse-server/config.d/.
+extraOverrides: |
+{{ readFile "files/config.d/custom.xml" | indent 2 }}
+
+extraDeploy:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: clickhouse
+      namespace: database
+    type: Opaque
+    stringData:
+      admin-password: {{ .Values.secrets.clickhouse.password | quote }}
+
+persistence:
+  enabled: true
+  size: 10Gi
+  {{- if (.Values.storageClass) }}
+  storageClass: {{ (.Values.storageClass) }}
+  {{- end }}
+
+# ── ClickHouse Keeper (Raft coordination, replaces ZooKeeper) ──
+# ── ClickHouse Keeper (Raft coordination, replaces ZooKeeper) ──
+keeper:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  replicaCount: 1
+
+# ── Hardening ───────────────────────────────────────────────
+podSecurityContext:
+  enabled: true
+  fsGroup: 1001
+containerSecurityContext:
+  enabled: true
+  runAsUser: 1001
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  seccompProfile: { type: RuntimeDefault }
+  capabilities: { drop: [ ALL ] }
+pdb:
+  maxUnavailable: 1
+  create: false
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+networkPolicy:
+  allowExternal: false
+  enabled: false
+
+# Expose HTTP(8123)/native(9000) as ClusterIP only; query via internal svc.
+service:
+  type: ClusterIP
+shards: 1
+replicaCount: 1
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits:   { cpu: 1, memory: 2Gi }
+
+podAntiAffinityPreset: soft

@@ -1,0 +1,235 @@
+# ============================================================
+# Grafana — Dashboards & Datasource Hub (PROD-HARDENED)
+# Chart: grafana/grafana (Chart v8, Grafana 11.x)
+#
+# Standalone release running in namespace `observability` alongside
+# Loki, Tempo, OpenSearch, and Prometheus.
+#
+# Metrics ↔ Logs ↔ Traces Correlation:
+#   Prometheus (metrics) ← kube-prometheus-stack-prometheus
+#   Loki       (logs)    ← loki-gateway         (derivedFields → Tempo)
+#   Tempo      (traces)  ← tempo:3100           (traces → logs & metrics)
+#   OpenSearch (search)  ← opensearch-cluster-master:9200
+#
+# Secrets — mapped from SOPS env secrets (environments/<env>/kubernetes/secrets.enc.yaml, age; no AWS):
+#   .Values.secrets.grafana.{username,password,secretKey}  → this file
+#   .Values.secrets.opensearch.password                    → datasources.yaml.gotmpl
+# ============================================================
+
+fullnameOverride: grafana
+
+# Single writable replica using SQLite on PVC (RWO).
+# For High Availability, configure an external database in grafana.ini.
+replicas: 1
+
+image:
+  repository: grafana/grafana
+  tag: "11.6.1"
+  pullPolicy: IfNotPresent
+
+# ── Pod / Container Security (PSS: Restricted) ─────────────
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 472
+  runAsGroup: 472
+  fsGroup: 472
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: [ ALL ]
+  seccompProfile:
+    type: RuntimeDefault
+
+# ── ServiceAccount & RBAC ────────────────────────────────────
+serviceAccount:
+  create: true
+  autoMount: true
+
+rbac:
+  create: true
+  pspEnabled: false
+  namespaced: true
+
+# ── Admin credentials + signing key (mapped from SOPS env secrets) ──
+# Values come from environments/<env>/kubernetes/secrets.enc.yaml via .Values.secrets.grafana.*; the
+# chart renders them into the `grafana` Secret. No AWS/ESO for local.
+# (AWS later: switch to admin.existingSecret + an ESO ExternalSecret that
+#  populates the same keys — see external-secrets/example-secretstore.yaml.)
+adminUser:     {{ .Values.secrets.grafana.username  | quote }}
+adminPassword: {{ .Values.secrets.grafana.password  | quote }}
+
+envRenderSecret:
+  # Session/cookie signing key — stable & shared across replicas/restarts.
+  GF_SECURITY_SECRET_KEY: {{ .Values.secrets.grafana.secretKey | quote }}
+
+# ── Persistence ─────────────────────────────────────────────
+# ── Persistence ─────────────────────────────────────────────
+persistence:
+  enabled: true
+  accessModes: ["ReadWriteOnce"]
+  {{- if (.Values.storageClass) }}
+  storageClassName: {{ (.Values.storageClass) }}
+  {{- end }}
+  size: 10Gi
+
+# ⚠ MUST stay false. The chart's init-chown-data container runs
+# `chown -R 472:472 /var/lib/grafana` as UID 0 with `capabilities.drop: [ALL]`
+# plus `add: [CHOWN]`. CHOWN lets it change ownership, but DAC_OVERRIDE — which
+# is what lets root traverse a directory it has no rwx on — is dropped. Grafana
+# creates `pdf/`, `png/` and `csv/` as mode 0700 owned by 472, so on the SECOND
+# install onwards `chown -R` cannot descend into them and exits 1:
+#     chown: /var/lib/grafana/pdf: Permission denied
+# The pod never starts (Init:Error) and helm blocks until timeout.
+#
+# The container is redundant anyway: podSecurityContext.fsGroup (472, above)
+# already makes the kubelet set group ownership on the volume at mount time.
+# Disabling it also removes the only root container in this release, which is
+# what the PSS-restricted posture in this file is aiming for.
+initChownData:
+  enabled: false
+
+# ── App Hardening (grafana.ini) ─────────────────────────────
+# ── App Hardening (grafana.ini) ─────────────────────────────
+grafana.ini:
+  server:
+    root_url: "https://grafana.{{ .Values.ingressDomain }}"
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  snapshots:
+    external_enabled: false
+  users:
+    allow_sign_up: false
+    default_theme: dark
+  auth.anonymous:
+    enabled: false
+  security:
+    disable_gravatar: true
+    x_content_type_options: true
+    x_xss_protection: true
+    content_security_policy: true
+    cookie_secure: true
+    cookie_samesite: strict
+    strict_transport_security: true
+    strict_transport_security_max_age_seconds: 31536000
+  log:
+    mode: console
+
+# ── Datasources ─────────────────────────────────────────────
+# Provisioned datasources (+ the OpenSearch plugin & secret mount they
+# require) live in a dedicated file, merged by the release:
+#   grafana/datasources.yaml.gotmpl
+
+# ── Sidecars ────────────────────────────────────────────────
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    searchNamespace: {{ (.Values.namespace            | default "observability") }}
+    folderAnnotation: grafana_folder
+    provider:
+      foldersFromFilesStructure: true
+  datasources:
+    enabled: true
+    label: grafana_datasource
+    searchNamespace: {{ (.Values.namespace            | default "observability") }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    capabilities:
+      drop: [ ALL ]
+    seccompProfile:
+      type: RuntimeDefault
+
+# ── ServiceMonitor ──────────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+# ── High Availability & Scheduling (Prod) ───────────────────
+
+# ── Ingress ─────────────────────────────────────────────────
+# ── Ingress ─────────────────────────────────────────────────
+ingress:
+  enabled: true
+  ingressClassName: {{ .Values.ingressClass }}
+  hosts:
+    - grafana.{{ .Values.ingressDomain }}
+  annotations:
+    # Kong: HTTPS only, plain HTTP → 308 (was nginx ssl-redirect "true"); 8 MB body limit
+    # (was ingress-nginx proxy-body-size 8m, controller-wide) — KongClusterPlugin in
+    # kubernetes/releases/platform/kong/manifests/plugins.yaml.
+    konghq.com/protocols: "https"
+    konghq.com/https-redirect-status-code: "308"
+    konghq.com/plugins: "request-size-limit"
+  tls:
+    - secretName: grafana-tls
+      hosts: [ "grafana.{{ .Values.ingressDomain }}" ]
+
+# ── Network Policy (Prod) ───────────────────────────────────
+
+# ── Unused Features ─────────────────────────────────────────
+imageRenderer:
+  enabled: false
+testFramework:
+  enabled: false
+dashboardProviders: {}
+dashboards: {}
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits:   { cpu: 1, memory: 1Gi }
+
+# ── High Availability & Scheduling (Prod) ───────────────────
+podDisruptionBudget:
+  maxUnavailable: 1
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+
+# ── Network Policy (Prod) ───────────────────────────────────
+extraObjects:
+  - apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: grafana
+    spec:
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: grafana
+      policyTypes: [ Ingress, Egress ]
+      ingress:
+        - from:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: infra
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: observability
+            - podSelector: {}
+          ports:
+            - { protocol: TCP, port: 3000 }
+      egress:
+        - to:
+            - namespaceSelector: {}
+          ports:
+            - { protocol: UDP, port: 53 }
+            - { protocol: TCP, port: 53 }
+        - to:
+            - podSelector: {}
+        - to:
+            - ipBlock: { cidr: 0.0.0.0/0 }
+          ports:
+            - { protocol: TCP, port: 5432 }
+            - { protocol: TCP, port: 443 }

@@ -1,0 +1,141 @@
+# ============================================================
+# kube-prometheus-stack — Prometheus server
+# Merged into the release on top of values.yaml.gotmpl.
+# Sizing/retention/storage per env via the $size table below.
+# ============================================================
+
+# ── Chart default alerting/recording rules ──────────────────
+# Ship the curated kube/node/prometheus rules; attach a runbook base URL
+# and a common `env` label so alerts route/annotate consistently.
+# ── Chart default alerting/recording rules ──────────────────
+# Ship the curated kube/node/prometheus rules; attach a runbook base URL
+# and a common `env` label so alerts route/annotate consistently.
+defaultRules:
+  create: true
+  runbookUrl: https://runbooks.prometheus-operator.dev/runbooks
+  # Silence rules that are noisy on managed/single-node clusters.
+  disabled:
+    Watchdog: false
+  labels:
+    env: prod
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 30s
+    scrapeTimeout: 10s
+    evaluationInterval: 30s
+    logLevel: info
+    logFormat: logfmt
+
+    # Feature flags:
+    #   exemplar-storage           → store trace exemplars (metrics → Tempo)
+    #   memory-snapshot-on-shutdown→ faster restarts (skip WAL replay)
+    enableFeatures:
+      - exemplar-storage
+      - memory-snapshot-on-shutdown
+    walCompression: true
+
+    # Security: no remote admin/delete API; TSDB write is via the operator.
+    enableAdminAPI: false
+
+    # Accept remote_write from Tempo's metrics-generator (RED / service-graph).
+    enableRemoteWriteReceiver: true
+
+    # Discover ServiceMonitors/PodMonitors/Rules from ALL namespaces so Loki,
+    # Tempo, OTel, OpenSearch and app services get scraped.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorNamespaceSelector: {}
+    ruleNamespaceSelector: {}
+    probeNamespaceSelector: {}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          {{- if (.Values.storageClass) }}
+          storageClassName: {{ (.Values.storageClass) }}
+          {{- end }}
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 100Gi
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      fsGroup: 2000
+    replicas: 2
+    retention: 15d
+    retentionSize: "100GB"
+
+    # Identify this Prometheus in federated/remote-write and alert payloads.
+    externalLabels:
+      cluster: prod
+      env: prod
+    externalUrl: https://prometheus.prod.{{ (.Values.ingressDomain | default "example.com") }}
+
+    resources:
+      requests: { cpu: 1, memory: 4Gi }
+      limits:   { cpu: 2, memory: 8Gi }
+    # Spread the replicas across nodes/zones for HA.
+    podAntiAffinity: soft
+    podAntiAffinityTopologyKey: kubernetes.io/hostname
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+
+    # ── Long-term storage (prod) → Grafana Mimir ────────────
+    # Ship samples to the in-cluster Mimir gateway for durable, long-retention
+    # metrics (backed by MinIO S3). Grafana queries Mimir as the historical
+    # Prometheus datasource. Single-tenant → no auth header; front with an
+    # authproxy + basic-auth secret if multitenancy is enabled in Mimir.
+    remoteWrite:
+      - url: http://mimir-gateway.observability.svc.{{ .Values.clusterDomain }}/api/v1/push
+        headers:
+          X-Scope-OrgID: "prod"
+        # Protect Prometheus memory during Mimir outages.
+        queueConfig:
+          capacity: 10000
+          maxShards: 50
+          maxSamplesPerSend: 2000
+        writeRelabelConfigs: []
+
+  ingress:
+    enabled: false      # expose via Grafana; enable + TLS if direct access needed
+  # HA: keep quorum during voluntary disruptions.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# ── Custom rules (recording/alerting) ───────────────────────
+# Drop-in PrometheusRule groups managed alongside the stack. Example:
+# additionalPrometheusRulesMap:
+#   app-slo-rules:
+#     groups:
+#       - name: app-slo
+#         rules:
+#           - alert: HighErrorRate
+#             expr: sum(rate(http_requests_total{code=~"5.."}[5m])) by (service)
+#                   / sum(rate(http_requests_total[5m])) by (service) > 0.05
+#             for: 10m
+#             labels: { severity: critical }
+#             annotations: { summary: "5xx error rate >5% on {{`{{ $labels.service }}`}}" }
+
+# ── Custom rules (recording/alerting) ───────────────────────
+# Drop-in PrometheusRule groups managed alongside the stack. Example:
+# additionalPrometheusRulesMap:
+#   app-slo-rules:
+#     groups:
+#       - name: app-slo
+#         rules:
+#           - alert: HighErrorRate
+#             expr: sum(rate(http_requests_total{code=~"5.."}[5m])) by (service)
+#                   / sum(rate(http_requests_total[5m])) by (service) > 0.05
+#             for: 10m
+#             labels: { severity: critical }
+#             annotations: { summary: "5xx error rate >5% on {{`{{ $labels.service }}`}}" }

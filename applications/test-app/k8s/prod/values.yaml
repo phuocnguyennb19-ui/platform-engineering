@@ -1,0 +1,193 @@
+# test-app · prod — toàn bộ value của app ở môi trường này (chart kubernetes/charts/application).
+# Thêm cấu hình: thêm key vào file này. Mọi key: docs/reference/application-chart.md
+
+fullnameOverride: test-app
+
+image: &app-image
+  registry: docker.io
+  repository: nginxinc/nginx-unprivileged
+  digest: sha256:7f79f463c6eb0d0bf8782992bb9636434398e3e5848398805aef2c9b025d8609
+  pullPolicy: IfNotPresent
+
+env:
+  NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+  TARGET_URL: "http://test-app"
+  STATUS_URL: "http://test-app:8081/status"
+  EXPECTED_TEXT: "deployment test-app"
+  INTERVAL_SECONDS: "30"
+
+service:
+  port: 80
+  targetPort: 8080
+
+extraPorts:
+  - {name: status, containerPort: 8081, protocol: TCP}
+
+probes:
+  startup: {httpGet: {path: /healthz, port: http}, periodSeconds: 2, failureThreshold: 15}
+  readiness: {httpGet: {path: /healthz, port: http}, periodSeconds: 10, timeoutSeconds: 3}
+  liveness: {httpGet: {path: /healthz, port: http}, periodSeconds: 15, timeoutSeconds: 3}
+
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: 500m, memory: 128Mi}
+
+extraVolumes:
+  - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
+  - name: html
+    configMap: {name: test-app-web, items: [{key: index.html, path: index.html}]}
+  - name: nginx-conf
+    configMap: {name: test-app-web, items: [{key: default.conf, path: default.conf}]}
+
+extraVolumeMounts:
+  - {name: tmp, mountPath: /tmp}
+  - {name: html, mountPath: /usr/share/nginx/html, readOnly: true}
+  - {name: nginx-conf, mountPath: /etc/nginx/conf.d, readOnly: true}
+
+initContainers:
+  - name: nginx-config-test
+    image: *app-image                  # the chart does not reuse the app's digest/registry by itself
+    command: ["nginx", "-t"]
+    resources:
+      requests: {cpu: 10m, memory: 16Mi}
+      limits: {cpu: 100m, memory: 32Mi}
+
+extraConfigMaps:
+  web:
+    index.html: |
+      <!doctype html>
+      <html lang="en">
+      <head><meta charset="utf-8"><title>deployment test-app</title></head>
+      <body><h1>deployment test-app</h1></body>
+      </html>
+    default.conf: |
+      server {
+        listen 8080;
+        server_name _;
+        root /usr/share/nginx/html;
+        server_tokens off;
+        add_header X-Test-App "deployment-test-app" always;
+
+        location = /healthz { access_log off; default_type text/plain; return 200 "ok\n"; }
+        location / { try_files $uri /index.html; }
+      }
+
+      server {
+        listen 8081;
+        server_tokens off;
+        location = /status { access_log off; stub_status; }
+      }
+
+networkPolicy:
+  ingress:
+    ports:
+      - {protocol: TCP, port: 8080}
+      - {protocol: TCP, port: 8081}
+
+workers:
+  - name: checker
+    initContainers: []
+    enabled: true
+    replicaCount: 1
+    image: &tools-image
+      repository: library/busybox
+      digest: sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+      pullPolicy: IfNotPresent
+    podSecurityContext: &tools-pod-security {runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+    securityContext: &tools-security {runAsUser: 65532}
+    resources: &tools-resources
+      requests: {cpu: 5m, memory: 8Mi}
+      limits: {cpu: 50m, memory: 16Mi}
+    extraPorts: []
+    extraVolumes: &tools-volumes [{name: tmp, emptyDir: {medium: Memory, sizeLimit: 8Mi}}]
+    extraVolumeMounts: &tmp-mount [{name: tmp, mountPath: /tmp}]
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        set -u
+        while true; do
+          touch /tmp/heartbeat
+          if wget -q -O /dev/null -T 5 "$TARGET_URL/healthz"; then
+            touch /tmp/ready; echo "$(date -Iseconds) ok   $TARGET_URL/healthz"
+          else
+            rm -f /tmp/ready;  echo "$(date -Iseconds) FAIL $TARGET_URL/healthz"
+          fi
+          sleep "$INTERVAL_SECONDS"
+        done
+    probes:
+      readiness: {exec: {command: ["test", "-f", "/tmp/ready"]}, periodSeconds: 10}
+      liveness: {exec: {command: ["/bin/sh", "-c", "find /tmp/heartbeat -mmin -2 | grep -q heartbeat"]}, initialDelaySeconds: 10, periodSeconds: 30}
+
+cronjobs:
+  - name: report
+    initContainers: []
+    enabled: true
+    schedule: "*/15 * * * *"
+    timeZone: Asia/Ho_Chi_Minh
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 120
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    backoffLimit: 2
+    activeDeadlineSeconds: 120
+    ttlSecondsAfterFinished: 3600
+    restartPolicy: Never
+    image: *tools-image
+    podSecurityContext: *tools-pod-security
+    securityContext: *tools-security
+    resources: *tools-resources
+    extraPorts: []
+    extraVolumes: *tools-volumes
+    extraVolumeMounts: *tmp-mount
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        set -eu
+        wget -q -O - -T 10 "$TARGET_URL/" | grep -q "$EXPECTED_TEXT"
+        echo "$(date -Iseconds) report ok: page contains '$EXPECTED_TEXT'"
+  - name: status-snapshot
+    initContainers: []
+    enabled: true
+    schedule: "0 * * * *"
+    timeZone: Asia/Ho_Chi_Minh
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 300
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    backoffLimit: 1
+    activeDeadlineSeconds: 60
+    ttlSecondsAfterFinished: 3600
+    restartPolicy: Never
+    image: *tools-image
+    podSecurityContext: *tools-pod-security
+    securityContext: *tools-security
+    resources: *tools-resources
+    extraPorts: []
+    extraVolumes: *tools-volumes
+    extraVolumeMounts: *tmp-mount
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        set -eu
+        echo "$(date -Iseconds) $(wget -q -O - -T 10 "$STATUS_URL" | tr '\n' ' ')"
+
+tests:
+  enabled: true
+  image: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+  path: /healthz
+  timeoutSeconds: 10
+
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: null
+
+ingress:
+  hosts:
+    - host: test-app.example.com
+      paths:
+        - {path: /, pathType: Prefix}
+  tls:
+    - secretName: test-app-tls
+      hosts: ["test-app.example.com"]

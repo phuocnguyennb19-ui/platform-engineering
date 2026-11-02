@@ -1,0 +1,155 @@
+# ============================================================
+# Pre-created infra namespaces with Pod Security Admission (PSA) labels.
+# Apply FIRST — before `helmfile -e <env> sync`:
+#   kubectl apply -f environments/<env>/kubernetes/namespace/namespaces.yaml
+#
+# Helm's --create-namespace does NOT label namespaces; pre-creating them
+# here lets PSA enforce the right baseline. Charts still `createNamespace:
+# true` (a no-op once the namespace exists).
+#
+# PSA levels are set to the TIGHTEST each workload supports:
+#   restricted  → controllers that run rootless, no host access
+#   baseline    → need extra caps (NET_BIND_SERVICE) or fsGroup quirks
+#   privileged  → DaemonSets with hostPath/hostNetwork (node-exporter,
+#                 velero node-agent, trivy node-collector)
+# `warn`/`audit` are set to `restricted` (or baseline) so violations are
+# surfaced in API responses + audit log WITHOUT breaking the workload.
+#
+# Namespace layout:
+#   infra          → platform tools: cert-manager, kong (ingress), ingress-nginx (legacy),
+#                    external-secrets, argocd, kyverno (mix of webhook +
+#                    controller workloads). PSA=baseline because argocd
+#                    (redis/dex fsGroup) + ingress-nginx (NET_BIND_SERVICE)
+#                    cannot run under `restricted`.
+#   observability  → prometheus stack, loki, tempo, otel, alloy, opensearch
+#   velero         → backup (node-agent hostPath → privileged)
+#   trivy-system   → security scanner (node-collector hostPath → privileged)
+#   database       → stateful data stores (reserved; no release yet)
+# kube-system tools (metrics-server, karpenter, reloader) live in the
+# pre-existing kube-system namespace and are not managed here.
+# ============================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels:
+    # Contains webhook controllers (cert-manager, ESO, kyverno, kong, ingress-nginx)
+    # AND argocd. enforce=baseline is the tightest level ingress-nginx
+    # (NET_BIND_SERVICE) and argocd (fsGroup) both support; warn/audit stay
+    # at restricted to surface violations without blocking the workloads.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    # node-exporter uses hostNetwork/hostPath → privileged; warn=baseline.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    # velero node-agent (Kopia) uses hostPath → privileged; warn=baseline.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trivy-system
+  labels:
+    # trivy node-collector uses hostPath → privileged; warn=baseline.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: database
+  labels:
+    # Stateful data stores: postgresql, redis, kafka, clickhouse, minio.
+    # Modern chart images (Bitnami et al.) run rootless and honor fsGroup, so
+    # `restricted` should hold; relax enforce → baseline if a specific engine
+    # needs extra caps.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+  labels:
+    # HashiCorp Vault (Raft HA). Runs rootless with an IPC_LOCK cap to prevent
+    # secrets swapping to disk → needs `baseline` (restricted forbids added caps).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor
+  labels:
+    # Harbor registry (core/registry/jobservice/trivy). Rootless images honor
+    # fsGroup; `restricted` holds.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: falco
+  labels:
+    # Falco DaemonSet reads kernel events via eBPF/modern-bpf + hostPath →
+    # privileged; warn=baseline to keep surfacing violations.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keda
+  labels:
+    # KEDA operator + metrics-apiserver run rootless; `restricted` holds.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    # Argo CD (redis/dex use fsGroup) → baseline, not restricted.
+    # ⚠ UNUSED TODAY: kubernetes/releases/platform/argocd/helmfile.yaml.gotmpl deploys the argocd release
+    #   into ns `infra`, not here. Kept so Argo CD can be split out of `infra`
+    #   later (it currently inherits infra's looser baseline PSA and has no
+    #   default-deny NetworkPolicy). Delete if you commit to `infra`.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# ── Namespace `prod` of this environment's app releases, with its PSA labels. Create it before
+#    the first `helmfile -e prod … sync` (helm would create it unlabelled). ──
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    gateway-access: "true"          # lets HTTPRoutes here attach to Gateway infra/platform
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

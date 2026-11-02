@@ -1,0 +1,67 @@
+apiVersion: v2
+name: application
+description: Production-grade generic chart for stateless and stateful applications, background workers and scheduled jobs on Kubernetes
+type: application
+
+# 2.3.0 — opt-in nginx reverse-proxy sidecar. No change for values that leave proxy off.
+#   • proxy.enabled: nginx container `proxy` in the app pod; Service targetPort `http`
+#     → nginx proxy.port → 127.0.0.1:proxy.upstreamPort (app port, renamed `app`)
+#   • app probes on `port: http` are rewritten to `port: app`; NetworkPolicy default
+#     ingress port is proxy.port; nginx.conf in ConfigMap <fullname>-proxy (checksum)
+#   • proxy.shutdown: nginx drains then quits before the app gets SIGTERM
+#
+# 2.2.0 — stricter values, PDB zero fix. No change for values that only use known keys.
+#   • values.schema.json rejects unknown top-level keys (a typo used to deploy the default)
+#   • podDisruptionBudget / workers[].podDisruptionBudget: minAvailable: 0 and
+#     maxUnavailable: 0 are rendered as given (0 used to fall back to maxUnavailable: 1)
+#
+# 2.1.0 — image and inheritance fixes. No change for values that pin every image.
+#   • an initContainer without `image` gets the app image with its registry and
+#     digest (was `<repository>:<AppVersion>` with no registry)
+#   • a worker/cronjob/initContainer naming another repository no longer inherits
+#     the app tag/digest (the app digest used to win: `busybox@sha256:<app digest>`)
+#   • a worker/cronjob that sets only `image.tag` runs that tag (the app digest won)
+#   • workers and cronjobs no longer inherit root `initContainers`
+#   • defaults: externalSecret.apiVersion external-secrets.io/v1; tests.image pinned
+#     by digest
+# 2.0.2 — topologySpreadConstraints: nodeTaintsPolicy is rendered; schema accepts
+#   minDomains, nodeAffinityPolicy, nodeTaintsPolicy, matchLabelKeys, labelSelector.
+#   No change for values that do not set them.
+# 2.0.1 — fix: templates/config/configmap.yaml separates every ConfigMap with `---`;
+#   `configmap` + `extraConfigMaps`, or 2+ extraConfigMaps entries, used to render as one
+#   document and lose all but the last ConfigMap.
+# 2.0.0 — BREAKING. See UPGRADING.md before deploying.
+#   • every workload carries app.kubernetes.io/component; Service / PDB /
+#     ServiceMonitor selectors are component-scoped (Deployment.spec.selector is
+#     immutable → the release must be recreated)
+#   • workload.kind: Deployment | StatefulSet | DaemonSet
+#   • per-worker KEDA / HPA / PDB / Service / ServiceMonitor
+#   • securityDefaults is wired in (it was dead configuration in 1.x)
+#   • hardened defaults, render-time validation, RBAC, VPA, GRPCRoute,
+#     CronJob timeZone, helm test, extraObjects, values.schema.json
+version: 2.3.0
+appVersion: "1.0.0"
+keywords:
+  - application
+  - microservice
+  - generic
+  - worker
+  - cronjob
+  - production
+maintainers:
+  - name: platform-team
+annotations:
+  artifacthub.io/containsSecurityUpdates: "true"
+  artifacthub.io/changes: |
+    - kind: security
+      description: securityDefaults is now applied to every container (was dead configuration)
+    - kind: fixed
+      description: worker and cronjob pods can no longer become endpoints of the application Service
+    - kind: fixed
+      description: KEDA ScaledObject can target a worker Deployment instead of the application
+    - kind: fixed
+      description: CronJob honours spec.timeZone instead of silently scheduling in UTC
+    - kind: added
+      description: workload.kind selects Deployment, StatefulSet or DaemonSet
+    - kind: added
+      description: values.schema.json, render-time validation and helm test

@@ -1,0 +1,84 @@
+# ============================================================
+# KEDA — Kubernetes Event-Driven Autoscaling
+# Chart: kedacore/keda · ns `keda`
+#
+# Adds event-source scaling (Kafka lag, Prometheus queries, Redis list depth,
+# cron, SQS, ...) on top of HPA. Scales workloads 0↔N via ScaledObject/
+# ScaledJob CRs the app teams create in their own namespaces.
+#
+# Pairs with the platform:
+#   - Prometheus scaler → scale on PromQL (e.g. request rate / queue depth)
+#   - Kafka scaler       → scale consumers on partition lag (release/kafka)
+#   - Node capacity comes from Karpenter (already deployed)
+#
+# What lives where:
+#   values.yaml.gotmpl → operator + metrics-apiserver sizing, HA, metrics
+#   Secret             → per-ScaledObject TriggerAuthentication (app-owned)
+#   config/            → n/a
+# ============================================================
+
+# ── Operator ────────────────────────────────────────────────
+# ── Operator ────────────────────────────────────────────────
+operator:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  replicaCount: 2
+
+# ── Metrics API server (feeds external.metrics.k8s.io) ──────
+# ── Metrics API server (feeds external.metrics.k8s.io) ──────
+metricsServer:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  replicaCount: 2
+
+# ── Admission webhooks ──────────────────────────────────────
+webhooks:
+  enabled: true
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+
+# ── Hardening ───────────────────────────────────────────────
+securityContext:
+  operator:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities: { drop: [ ALL ] }
+    seccompProfile: { type: RuntimeDefault }
+
+# ── HA scheduling (prod) ────────────────────────────────────
+
+# ── Metrics ─────────────────────────────────────────────────
+prometheus:
+  metricServer:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: kube-prometheus-stack
+  operator:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: kube-prometheus-stack
+
+# ── HA scheduling (prod) ────────────────────────────────────
+podDisruptionBudget:
+  operator:
+    minAvailable: 1
+  metricServer:
+    minAvailable: 1
+affinity:
+  operator:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app: keda-operator

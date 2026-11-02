@@ -35,8 +35,8 @@ age-key*.txt
 # Helm / Helmfile artifacts
 *.tgz
 dist/
-k8s/reports/
-k8s/charts/**/charts/
+kubernetes/reports/
+kubernetes/charts/**/charts/
 **/Chart.lock
 .helmfile/
 helmfile-*.yaml.build
@@ -67,3 +67,6 @@ Thumbs.db
 *.swp
 *~
 .claude/settings.local.json
+
+# Personal deploy-target overrides (environments/<env>/kubernetes/cluster/target.yaml)
+environments/*/kubernetes/cluster/target.local.yaml

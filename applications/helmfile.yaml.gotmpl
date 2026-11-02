@@ -1,0 +1,99 @@
+# ============================================================
+# applications/ → kubernetes/charts/application. THE place the app value layers are defined.
+# One release per app, generated from the folder tree: every
+# applications/<app>/k8s/<env>/values.yaml of the selected environment becomes release <app>.
+# No release is declared by hand; adding the file adds the release.
+#
+# Environments are dev | staging | prod only — one values file per app per environment.
+# WHERE an environment runs (EKS, Docker Desktop, K3s, …) is not a values question: it is
+# the deploy target in ../environments/<env>/kubernetes/cluster/target.yaml (+ gitignored target.local.yaml),
+# whose cluster file (../environments/<env>/kubernetes/cluster/<cluster>.yaml) gives the kube context and owner.
+#
+# Values, lowest first:
+#   ../environments/<env>/kubernetes/app-values.yaml.gotmpl    platform defaults of the environment (complete, no shared layer)
+#   <app>/k8s/<env>/values.yaml                                  the app's complete values
+# Argo CD cannot read a helmfile: kubernetes/argocd/bootstrap/applicationset-apps.yaml repeats these
+# layers, and scripts/docs/check-argocd-layers.sh fails when the two differ.
+#
+# Every install/upgrade/uninstall runs release-guard.sh first, which refuses unless the
+# command selects the app by name (-l name=<app>), the target's context exists and its owner
+# is helmfile, no REPLACE_WITH_ placeholder is left, Argo CD does not own the release, and —
+# for prod — CONFIRM_DEPLOY=<app>@prod is set. template / diff / lint / list are never blocked.
+#
+# Deploy one app (from the repository root, through ../helmfile.yaml.gotmpl):
+#   helmfile -e dev -l name=<app> diff
+#   helmfile -e dev -l name=<app> sync
+#   helm --kube-context=<context> -n dev history <app>      # rollback: helm rollback <app> <rev>
+# KUBE_CONTEXT_<ENV> (KUBE_CONTEXT_DEV / _STAGING / _PROD) and APP_TIER_OWNER override the target
+# files for one command. A context override is per environment, so one left exported from dev work
+# can never point staging/prod at the wrong cluster; plain KUBE_CONTEXT is refused by the guard.
+# ============================================================
+
+{{- /* Deploy targets: ../environments/<env>/kubernetes/cluster/target.yaml (+ gitignored target.local.yaml)
+       name the cluster of each environment; <cluster>.yaml in the same folder gives context and
+       owner. KUBE_CONTEXT_<ENV> / APP_TIER_OWNER, when set, override for one command. */}}
+{{- $K := "../environments" }}
+
+environments:
+{{- range $e := list "dev" "staging" "prod" }}
+{{-   $dir := printf "%s/%s/kubernetes/cluster" $K $e }}
+{{-   $t := dict }}
+{{-   range $f := list (printf "%s/target.yaml" $dir) (printf "%s/target.local.yaml" $dir) }}
+{{-     if isFile $f }}{{ $t = mergeOverwrite $t (readFile $f | fromYaml | default dict) }}{{ end }}
+{{-   end }}
+{{-   $cluster := dig "cluster" "" $t }}
+{{-   $meta := dict }}
+{{-   if and $cluster (isFile (printf "%s/%s.yaml" $dir $cluster)) }}{{ $meta = readFile (printf "%s/%s.yaml" $dir $cluster) | fromYaml }}{{ end }}
+{{-   $ctx := env (printf "KUBE_CONTEXT_%s" (upper $e)) | default (dig "context" "" $t) | default (dig "context" "" $meta) }}
+{{-   if hasPrefix "<" $ctx }}{{ $ctx = "" }}{{ end }}
+{{-   $owner := env "APP_TIER_OWNER" | default (dig "delivery" "owner" "" $meta) }}
+  {{ $e }}:
+    values:
+      - kubeContext: {{ $ctx | quote }}
+        appTierOwner: {{ $owner | quote }}
+        targetCluster: {{ $cluster | quote }}
+{{- end }}
+
+---
+
+helmDefaults:
+  kubeContext: {{ .Values | get "kubeContext" "" }}   # from the deploy target; "" → refused by release-guard.sh
+  wait: true
+  waitForJobs: true
+  timeout: 300
+  historyMax: 5
+
+---
+
+{{- $env := .Environment.Name }}
+{{- $E := "../environments" }}
+
+releases:
+{{- range $app := readDirEntries "." }}
+{{- /* A folder starting with `_` (applications/_template) is not an app. */}}
+{{- if and $app.IsDir (not (hasPrefix "_" $app.Name)) (isFile (printf "%s/k8s/%s/values.yaml" $app.Name $env)) }}
+{{- $files := list (printf "%s/%s/kubernetes/app-values.yaml.gotmpl" $E $env) (printf "%s/k8s/%s/values.yaml" $app.Name $env) }}
+{{- /* A placeholder blocks the release only where the release uses it: an app that sets its
+       own image.registry does not depend on the environment's global.imageRegistry. */}}
+{{- $ownRegistry := dig "image" "registry" "" (readFile (printf "%s/k8s/%s/values.yaml" $app.Name $env) | fromYaml) }}
+{{- $placeholder := "" }}
+{{- range $f := $files }}
+{{-   $content := readFile $f }}
+{{-   if $ownRegistry }}{{ $content = regexReplaceAll "(?m)^[ \t]*imageRegistry:.*$" $content "" }}{{ end }}
+{{-   if and (not $placeholder) (regexMatch "(?m)^[^#\n]*REPLACE_WITH_" $content) }}{{ $placeholder = $f }}{{ end }}
+{{- end }}
+  - name: {{ $app.Name }}
+    namespace: {{ $env }}
+    chart: ../kubernetes/charts/application
+    labels: { name: {{ $app.Name }}, layer: app }
+    values:
+{{- range $f := $files }}
+      - {{ $f }}
+{{- end }}
+    hooks:
+      - events: [ preapply, presync, preuninstall ]
+        showlogs: true
+        command: sh
+        args: [ "../scripts/deploy/release-guard.sh", {{ $env | quote }}, {{ $app.Name | quote }}, {{ $.Values.kubeContext | quote }}, {{ $placeholder | quote }}, {{ $.Values | get "appTierOwner" "" | quote }}, {{ $.Values | get "targetCluster" "" | quote }} ]
+{{- end }}
+{{- end }}

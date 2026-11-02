@@ -1,0 +1,34 @@
+# Cluster METADATA — what this cluster is and what it must offer. It provisions nothing.
+# The staging EKS cluster platform-staging-eks. Its name and settings are owned by
+# environments/staging/terraform/core.yaml and mirrored in
+# environments/<env>/kubernetes/state.yaml (env `staging`); not repeated here.
+schema: kubernetes-environment/v1alpha1
+name: eks-staging
+provider: eks
+environment: staging
+context: <eks-staging-context-alias>   # a local alias, never the cluster ARN (it embeds the account ID)
+
+provisioning:
+  method: terraform           # plan:core → apply:core (manual) in ci/terraform/platform.yml
+  source: terraform/stacks/core
+
+delivery:
+  # apps: manual helmfile (APP_TIER_OWNER=helmfile, scripts/deploy/release-guard.sh) until Argo CD
+  # takes over; platform tools: helmfile releases synced by CI (ci/k8s/helmfile.yml)
+  owner: helmfile
+  ciDeployAllowed: false
+
+# Field meanings and preflight semantics: schemas/cluster.schema.json, README.md §4.
+capabilities:
+  ingress:
+    expected: required  # staging/app-values.yaml.gotmpl: ingress.enabled, className kong (state.yaml ingressClass)
+    verified: unknown
+  gatewayAPI:
+    expected: optional  # kubernetes/releases/platform/gateway-api (Kong); no app values use it
+    verified: unknown
+  prometheusOperator:
+    expected: optional  # apps opt in with prometheusRule.enabled (off in shared app-values)
+    verified: unknown
+  persistentStorage:
+    expected: optional  # the eks module default add-ons include aws-ebs-csi-driver
+    verified: unknown

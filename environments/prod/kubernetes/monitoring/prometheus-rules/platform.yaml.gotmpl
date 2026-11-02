@@ -1,0 +1,91 @@
+additionalPrometheusRulesMap:
+  platform-cert-manager:
+    groups:
+      - name: cert-manager
+        rules:
+          - alert: CertManagerCertificateExpiringSoon
+            expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 21 * 24 * 3600
+            for: 1h
+            labels: { severity: warning, env: prod }
+            annotations:
+              summary: "Certificate {{`{{ $labels.name }}`}} expires in under 21 days"
+              description: "cert-manager has not renewed {{`{{ $labels.name }}`}}; it expires in {{`{{ $value | humanizeDuration }}`}}."
+          - alert: CertManagerCertificateExpiryCritical
+            expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 7 * 24 * 3600
+            for: 1h
+            labels: { severity: critical, env: prod }
+            annotations:
+              summary: "Certificate {{`{{ $labels.name }}`}} expires in under 7 days"
+              description: "Renewal is failing for {{`{{ $labels.name }}`}}; check the Certificate, CertificateRequest and Order events."
+          - alert: CertManagerCertificateNotReady
+            expr: certmanager_certificate_ready_status{condition="False"} == 1
+            for: 15m
+            labels: { severity: warning, env: prod }
+            annotations:
+              summary: "Certificate {{`{{ $labels.name }}`}} is not Ready"
+              description: "Certificate {{`{{ $labels.name }}`}} has been Ready=False for 15m."
+
+  # LEGACY — remove this group at step 5 of the Kong cutover (kubernetes/releases/platform/kong/README.md §8),
+  # once ingressNginx: false in state.yaml has uninstalled ingress-nginx. Until then it still fires
+  # for whatever traffic is left on the old NLB.
+  platform-ingress-nginx:
+    groups:
+      - name: ingress-nginx
+        rules:
+          - alert: IngressNginxHighErrorRate
+            expr: |
+              sum by (ingress) (rate(nginx_ingress_controller_requests{status=~"5.."}[5m]))
+              / clamp_min(sum by (ingress) (rate(nginx_ingress_controller_requests[5m])), 0.001)
+              > 0.05
+            for: 10m
+            labels: { severity: critical, env: prod }
+            annotations:
+              summary: "Ingress {{`{{ $labels.ingress }}`}} 5xx ratio above 5%"
+              description: "5xx ratio is {{`{{ $value | humanizePercentage }}`}} over 5m."
+
+  # Kong is the only ingress controller. Availability from kube-state-metrics (enabled in
+  # kube-prometheus-stack), not from Kong's own /metrics: the status endpoint only exports
+  # kong_* series once the `prometheus` KongClusterPlugin is applied, so an `up`-based rule
+  # would misfire between a release sync and the plugins.yaml apply.
+  platform-kong:
+    groups:
+      - name: kong
+        rules:
+          - alert: KongProxyUnavailable
+            expr: kube_deployment_status_replicas_available{namespace="infra", deployment="kong"} < 1
+            for: 5m
+            labels: { severity: critical, env: prod }
+            annotations:
+              summary: "Kong (ingress controller + proxy) has no available replica"
+              description: "Deployment infra/kong has had 0 available replicas for 5m — every Ingress of class kong is down."
+
+  platform-velero:
+    groups:
+      - name: velero
+        rules:
+          - alert: VeleroBackupFailed
+            expr: increase(velero_backup_failure_total[1h]) > 0
+            for: 5m
+            labels: { severity: warning, env: prod }
+            annotations:
+              summary: "Velero backup failed for schedule {{`{{ $labels.schedule }}`}}"
+              description: "{{`{{ $value }}`}} failed backups in the last hour."
+          - alert: VeleroBackupTooOld
+            expr: time() - velero_backup_last_successful_timestamp{schedule!=""} > 26 * 3600
+            for: 15m
+            labels: { severity: critical, env: prod }
+            annotations:
+              summary: "No successful Velero backup for schedule {{`{{ $labels.schedule }}`}} in 26h"
+              description: "Last success was {{`{{ $value | humanizeDuration }}`}} ago."
+
+  platform-external-secrets:
+    groups:
+      - name: external-secrets
+        rules:
+          - alert: ExternalSecretNotSynced
+            expr: externalsecret_status_condition{condition="Ready",status="False"} == 1
+            for: 15m
+            labels: { severity: warning, env: prod }
+            annotations:
+              summary: "ExternalSecret {{`{{ $labels.name }}`}} is not syncing"
+              description: "ExternalSecret {{`{{ $labels.name }}`}} has been Ready=False for 15m; the target Secret is stale or missing."

@@ -1,5 +1,5 @@
 variable "config_root" {
-  description = "Directory holding environments/ (infra-base/terraform/)."
+  description = "Directory holding <dir>/terraform/{environment,core,backend}.yaml per environment (environments/)."
   type        = string
 }
 
@@ -10,12 +10,12 @@ variable "applications_root" {
 }
 
 variable "environment" {
-  description = "Directory name under infra-base/terraform/environments/."
+  description = "Terraform environment name: the `environment:` field of environments/<dir>/terraform/environment.yaml (dev | staging | production)."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,31}$", var.environment))
-    error_message = "environment must be a lowercase directory name under infra-base/terraform/environments/."
+    error_message = "environment must be a lowercase Terraform environment name (dev | staging | production)."
   }
 }
 

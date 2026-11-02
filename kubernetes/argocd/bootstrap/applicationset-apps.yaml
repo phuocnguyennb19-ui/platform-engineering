@@ -1,0 +1,114 @@
+# ============================================================
+# ApplicationSet — generates one Application per env × per directory under
+# applications/*/k8s (an app without a k8s/ folder, e.g. ECS-only, gets none).
+#
+# Add a new app = create one COMPLETE values file per environment,
+# applications/<name>/k8s/<env>/values.yaml (no shared app file), and commit. Nothing
+# to edit here. (`make new-app`; the example is applications/frontend-html.)
+#
+# ── OWNERSHIP ───────────────────────────────────────────────────────────────
+# The app-tier has TWO possible owners; only one may be active (see the header
+# of helmfile.yaml.gotmpl):
+#   APP_TIER_OWNER=helmfile → helmfile owns the app releases. DO NOT apply this
+#                             ApplicationSet, or Argo and helmfile will fight
+#                             over the same Deployments (selfHeal + prune vs
+#                             helmfile sync = an endless revert loop).
+#   APP_TIER_OWNER=argocd   → apply this; set the helmfile releases to
+#                             installed:false.
+#
+# ── SOURCES ─────────────────────────────────────────────────────────────────
+# Multi-source:
+#   1) charts/application read straight from git (no OCI registry needed)
+#   2) the same repo under ref `values`, so source (1) can reference $values
+# App secrets come from ESO/SealedSecrets, never from these values files.
+# ============================================================
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-apps
+  namespace: infra
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  generators:
+    # Matrix: every app directory × every environment. Previously a bare git
+    # generator produced ONE Application per app, all hardcoded to namespace
+    # `dev` — staging and prod could never be delivered through GitOps.
+    - matrix:
+        generators:
+          - git:
+              # GitLab is the source of truth: that is where CI runs and where
+              # the chart is published from. This used to point at a GitHub
+              # mirror (phuocnguyennb19-ui/helm-project @ master-v1), so Argo
+              # and CI could drift apart silently.
+              repoURL: https://gitlab.com/myorg/helm-project-v3.git
+              revision: main
+              directories:
+                - path: applications/*/k8s
+                - path: applications/_*/k8s     # applications/_template is not an app
+                  exclude: true
+          # Only the cluster this Argo CD runs in, labelled by the argocd release
+          # (environments/<env>/kubernetes/tools/argocd/values.yaml.gotmpl → configs.clusterCredentials). One cluster
+          # never deploys another environment's apps.
+          # Prod carries auto-sync=false: no self-heal or prune without a human,
+          # because prune can delete live resources. Sync prod after review.
+          - clusters:
+              selector:
+                matchExpressions:
+                  - key: platform.example.com/environment
+                    operator: In
+                    values: [dev, staging, prod]
+
+  template:
+    metadata:
+      name: '{{index .path.segments 1}}-{{index .metadata.labels "platform.example.com/environment"}}'
+      namespace: infra
+      labels:
+        app.kubernetes.io/part-of: platform
+        app.kubernetes.io/instance: '{{index .path.segments 1}}'
+        environment: '{{index .metadata.labels "platform.example.com/environment"}}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: platform
+      sources:
+        - repoURL: https://gitlab.com/myorg/helm-project-v3.git
+          targetRevision: main
+          path: kubernetes/charts/application
+          helm:
+            releaseName: '{{index .path.segments 1}}'
+            # A copy of the layers of applications/helmfile.yaml.gotmpl (Argo CD cannot read a
+            # helmfile); `make argocd-render` fails when the two differ.
+            valueFiles:
+              - '$values/environments/{{index .metadata.labels "platform.example.com/environment"}}/kubernetes/app-values.yaml.gotmpl'
+              # The app's complete values in this environment (one file per env).
+              - '$values/{{.path.path}}/{{index .metadata.labels "platform.example.com/environment"}}/values.yaml'
+        - repoURL: https://gitlab.com/myorg/helm-project-v3.git
+          targetRevision: main
+          ref: values
+      destination:
+        server: '{{.server}}'
+        namespace: '{{index .metadata.labels "platform.example.com/environment"}}'
+      syncPolicy:
+        # `automated` is added per-env by templatePatch below — it cannot live
+        # here, because a Go `{{- if }}` block placed directly in the template
+        # would make this manifest invalid YAML (kubectl parses the file long
+        # before the ApplicationSet controller evaluates any template).
+        syncOptions:
+          - CreateNamespace=true
+          - ApplyOutOfSyncOnly=true
+        retry:
+          limit: 3
+          backoff: { duration: 15s, factor: 2, maxDuration: 3m }
+
+  # templatePatch is a STRING, so Go template control flow is legal here and
+  # the surrounding document stays valid YAML. Merged over `template` above.
+  templatePatch: |
+    {{- if eq (index .metadata.labels "platform.example.com/auto-sync") "true" }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+    {{- end }}

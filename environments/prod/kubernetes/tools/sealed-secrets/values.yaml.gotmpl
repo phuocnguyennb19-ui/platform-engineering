@@ -1,0 +1,71 @@
+# ============================================================
+# Sealed Secrets — encrypt secrets INTO git safely (Bitnami controller)
+# Chart: sealed-secrets/sealed-secrets · ns `infra`
+#
+# Complements SOPS/ESO/Vault: `kubeseal` encrypts a Secret with the
+# controller's public cert → a SealedSecret CR that is safe to commit; only
+# the in-cluster controller can decrypt it. Good for GitOps-committed secrets
+# that don't warrant a full Vault path.
+#
+# Key management (CRITICAL):
+#   The controller auto-generates a sealing keypair and rotates it (default
+#   30 days), keeping old keys to decrypt existing SealedSecrets. BACK UP the
+#   `sealed-secrets-key*` secrets (label sealedsecrets.bitnami.com/sealed-secrets-key)
+#   via Velero — losing them makes every committed SealedSecret undecryptable.
+#
+# What lives where:
+#   values.yaml.gotmpl → controller sizing, key rotation, metrics
+#   Secret             → sealing keypair (controller-managed; back up, don't commit)
+#   config/            → n/a (controller is config-light)
+# ============================================================
+
+fullnameOverride: sealed-secrets
+
+image:
+  registry: docker.io
+  repository: bitnami/sealed-secrets-controller
+  tag: "0.30.0"
+
+resources:
+  requests: { cpu: 50m,  memory: 128Mi }
+  limits:   { cpu: 200m, memory: 256Mi }
+
+# ── Key rotation ────────────────────────────────────────────
+# 30d rotation; old keys retained so previously-sealed secrets still decrypt.
+keyrenewperiod: "720h"
+
+# ── Hardening ───────────────────────────────────────────────
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  fsGroup: 65534
+  seccompProfile: { type: RuntimeDefault }
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ ALL ] }
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    namespace: infra
+    labels:
+      release: kube-prometheus-stack
+# ── HA (prod) ───────────────────────────────────────────────
+replicaCount: 2
+
+networkPolicy:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: sealed-secrets

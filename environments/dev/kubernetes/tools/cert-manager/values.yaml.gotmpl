@@ -1,0 +1,99 @@
+# cert-manager — TLS certificate automation
+
+# Install cert-manager's own CRDs (Certificate, Issuer, ClusterIssuer...).
+crds:
+  enabled: true
+  keep: true
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits:   { cpu: 200m, memory: 256Mi }
+
+webhook:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits:   { cpu: 100m, memory: 128Mi }
+  replicaCount: 1
+
+cainjector:
+  resources:
+    requests: { cpu: 20m, memory: 128Mi }
+    limits:   { cpu: 100m, memory: 256Mi }
+  replicaCount: 1
+
+# Ship metrics to Prometheus.
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: true
+
+# ── ClusterIssuers ──────────────────────────────────────────
+# The cert-manager chart creates no issuers of its own, so they ride along as
+# extraObjects. This keeps them in the same release instead of a manual
+# `kubectl apply` that is easy to forget on a new cluster.
+#
+# They are post-install/post-upgrade HOOKS. Helm maps every normal manifest of a
+# release before creating anything, and on a fresh cluster the ClusterIssuer kind
+# does not exist yet (its CRD comes from this same release, crds.enabled), so a
+# plain extraObject fails the first install with `no matches for kind
+# "ClusterIssuer"`. A hook is mapped only when it runs: after the CRDs, after
+# `wait` (controller + webhook Ready) and after the chart's own startupapicheck
+# hook (weight 1). One `sync` installs everything, on a new or existing cluster.
+# Trade-offs: `before-hook-creation` deletes and recreates both issuers on every
+# sync (the ACME account key Secret stays, issued certificates are untouched);
+# `helm uninstall` leaves them behind; helm lists them as hooks, not resources.
+#
+# ⚠ THE SOLVER INGRESS CLASS IS PER-ENV. It used to be hardcoded to
+#   `nginx-prod` in BOTH issuers, so ACME HTTP-01 challenges in dev/staging
+#   were routed to an IngressClass that does not exist there
+#   and never validated. It now follows .Values.ingressClass from
+#   environments/<env>/kubernetes/state.yaml — `kong` in every env. The solver
+#   Ingress keeps Kong's default protocols (http,https), so the challenge is
+#   answered on port 80 even where app Ingresses redirect HTTP → HTTPS; that
+#   needs the Kong proxy http listener on (ingress/kong values: proxy.http.enabled).
+#
+# Point an Ingress at one with:
+#   annotations:
+#     cert-manager.io/cluster-issuer: letsencrypt-prod
+#
+# Use letsencrypt-staging while wiring things up — the production ACME endpoint
+# rate-limits to 5 duplicate certificates per week per exact name set.
+extraObjects:
+  - |
+    apiVersion: cert-manager.io/v1
+    kind: ClusterIssuer
+    metadata:
+      name: letsencrypt-staging
+      annotations:
+        helm.sh/hook: post-install,post-upgrade
+        helm.sh/hook-weight: "10"
+        helm.sh/hook-delete-policy: before-hook-creation
+    spec:
+      acme:
+        server: https://acme-staging-v02.api.letsencrypt.org/directory
+        email: {{ env "ACME_EMAIL" | default "platform@example.com" | quote }}
+        privateKeySecretRef:
+          name: letsencrypt-staging-account-key
+        solvers:
+          - http01:
+              ingress:
+                ingressClassName: {{ .Values.ingressClass | quote }}
+  - |
+    apiVersion: cert-manager.io/v1
+    kind: ClusterIssuer
+    metadata:
+      name: letsencrypt-prod
+      annotations:
+        helm.sh/hook: post-install,post-upgrade
+        helm.sh/hook-weight: "10"
+        helm.sh/hook-delete-policy: before-hook-creation
+    spec:
+      acme:
+        server: https://acme-v02.api.letsencrypt.org/directory
+        email: {{ env "ACME_EMAIL" | default "platform@example.com" | quote }}
+        privateKeySecretRef:
+          name: letsencrypt-prod-account-key
+        solvers:
+          - http01:
+              ingress:
+                ingressClassName: {{ .Values.ingressClass | quote }}
+replicaCount: 1

@@ -7,6 +7,11 @@ output "environment" {
   value = var.environment
 }
 
+output "env_path" {
+  description = "Repository path of the selected environment's Terraform values (environments/<dir>/terraform), for error messages."
+  value       = local.env_path
+}
+
 output "account_id" {
   value = local.account_id
 }

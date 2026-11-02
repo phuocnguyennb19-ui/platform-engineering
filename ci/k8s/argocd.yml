@@ -1,5 +1,5 @@
 # ============================================================
-# ARGO CD workflow — GitOps app-tier (argocd/**, applications/*/k8s/**)
+# ARGO CD workflow — GitOps app-tier (kubernetes/argocd/**, applications/*/k8s/**)
 #
 # Include from the root .gitlab-ci.yml:
 #   include: { local: ci/k8s/argocd.yml }
@@ -8,7 +8,7 @@
 # per-app deploys — CI only (1) validates manifests/values, (2) ensures the
 # App-of-Apps root exists, (3) optionally `argocd app diff` for PR review.
 #
-# Trigger: changes under argocd/** or applications/*/k8s/**.
+# Trigger: changes under kubernetes/argocd/** or applications/*/k8s/**.
 #
 # CI/CD vars (group-level):
 #   DEPLOY_TOOLS_IMAGE       image with kubectl + helm (+ argocd cli for diff)
@@ -19,52 +19,60 @@
 
 .argocd-changes: &argocd-changes
   changes:
-    - argocd/**/*
+    - kubernetes/argocd/**/*
+    - scripts/deploy/check-argocd-bootstrap.sh
     - applications/*/k8s/**/*
-    - k8s/charts/application/**/*
+    - applications/helmfile.yaml.gotmpl
+    - environments/*/kubernetes/app-values.yaml.gotmpl
+    - kubernetes/charts/application/**/*
 
 
 # stages declared in the root .gitlab-ci.yml: argo-validate · argo-diff · argo-bootstrap
 
 # ── VALIDATE — offline, no cluster needed ───────────────────
 # 1) client-side YAML + schema check for the Argo manifests.
-# 2) helm template the application chart with EACH app values → ensures it renders.
+# 2) render every app × env through applications/helmfile.yaml.gotmpl → ensures it renders.
 argocd:validate:
   image: $DEPLOY_TOOLS_IMAGE
   stage: argo-validate
   script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     # The manifests must point at THIS project: a wrong repoURL makes Argo deploy
     # from somewhere CI never validated.
     - |
       want="${CI_PROJECT_URL}.git"
-      bad=$(grep -rhoE 'repoURL: *[^ ]+|^ *- https://[^ ]+\.git' ../argocd/root-app.yaml ../argocd/bootstrap | grep -oE 'https://[^ ]+' | sort -u | grep -vxF "$want" || true)
+      bad=$(grep -rhoE 'repoURL: *[^ ]+|^ *- https://[^ ]+\.git' argocd/root-app.yaml argocd/bootstrap | grep -oE 'https://[^ ]+' | sort -u | grep -vxF "$want" || true)
       [ -z "$bad" ] || { echo "[ERROR] Argo CD repoURL must be ${want}; found: ${bad}"; exit 1; }
+    # The root app syncs bootstrap/ with prune + selfHeal and may write AppProjects and
+    # ApplicationSets: refuse anything that would widen Argo CD (a permissive AppProject, an
+    # ApplicationSet outside project platform, another kind, another source).
+    - |
+      set -euo pipefail
+      case "$(uname -m)" in
+        x86_64) YQ_ARCH=amd64; YQ_SHA256=0fb28c6680193c41b364193d0c0fc4a03177aecde51cfc04d506b1517158c2fb ;;
+        aarch64|arm64) YQ_ARCH=arm64; YQ_SHA256=b7f7c991abe262b0c6f96bbcb362f8b35429cefd59c8b4c2daa4811f1e9df599 ;;
+        *) echo "[ERROR] no pinned yq build for $(uname -m)"; exit 1 ;;
+      esac
+      curl -fsSL -o /tmp/yq "https://github.com/mikefarah/yq/releases/download/v4.47.1/yq_linux_${YQ_ARCH}"
+      echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -
+      chmod +x /tmp/yq
+      PATH="/tmp:$PATH" bash "$CI_PROJECT_DIR/scripts/deploy/check-argocd-bootstrap.sh" "${CI_PROJECT_URL}.git"
     - |
       echo "=== 1. Argo manifests (client dry-run) ==="
-      kubectl apply --dry-run=client -f ../argocd/root-app.yaml
-      kubectl apply --dry-run=client -R -f ../argocd/bootstrap/
+      kubectl apply --dry-run=client -f argocd/root-app.yaml
+      kubectl apply --dry-run=client -R -f argocd/bootstrap/
 
-      echo "=== 2. Render the application chart with each app values ==="
-      for dir in ../applications/*/k8s/; do
-        app=$(basename "$(dirname "$dir")")
-        for env in dev staging prod; do
-          echo "--- $app @ $env ---"
-          helm template "$app" charts/application \
-            -f ../infra-base/k8s/env-values/app-values.yaml.gotmpl -f "../infra-base/k8s/env-values/${env}/app-values.yaml.gotmpl" \
-            -f "${dir}values.yaml" -f "${dir}${env}/values.yaml" > /dev/null
-          # on-prem target: the app opts in with k8s/onprem-<env>/values.yaml
-          [ -f "${dir}onprem-${env}/values.yaml" ] || continue
-          echo "--- $app @ onprem-$env ---"
-          helm template "$app" charts/application \
-            -f ../infra-base/k8s/env-values/app-values.yaml.gotmpl -f "../infra-base/k8s/env-values/${env}/app-values.yaml.gotmpl" \
-            -f "../infra-base/k8s/env-values/onprem-${env}/app-values.yaml.gotmpl" \
-            -f "${dir}values.yaml" -f "${dir}${env}/values.yaml" -f "${dir}onprem-${env}/values.yaml" > /dev/null
-        done
+      echo "=== 2. Render every app × env through applications/helmfile.yaml.gotmpl ==="
+      # The value layers are defined only there (the ApplicationSet repeats them;
+      # `make argocd-render` checks the two agree).
+      for env in dev staging prod; do
+        echo "--- apps @ $env ---"
+        helmfile -e "$env" -f ../applications/helmfile.yaml.gotmpl template --skip-deps --allow-no-matching-release > /dev/null
       done
       echo "[OK] app-tier manifests + values are valid"
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       <<: *argocd-changes
     - if: $CI_COMMIT_BRANCH
@@ -76,7 +84,7 @@ argocd:diff:
   image: $DEPLOY_TOOLS_IMAGE
   stage: argo-diff
   script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - |
       if [ -z "$ARGOCD_SERVER" ] || [ -z "$ARGOCD_AUTH_TOKEN" ]; then
         echo "[SKIP] ARGOCD_SERVER/ARGOCD_AUTH_TOKEN not configured"; exit 0
@@ -89,6 +97,7 @@ argocd:diff:
   allow_failure: true
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       <<: *argocd-changes
 
@@ -99,21 +108,21 @@ argocd:diff:
   image: $DEPLOY_TOOLS_IMAGE
   stage: argo-bootstrap
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - !reference [.ci-env-select, script]
     - !reference [.ci-aws-auth, script]
     - !reference [.ci-eks-kubeconfig, script]
   script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     # The manifests must point at THIS project: a wrong repoURL makes Argo deploy
     # from somewhere CI never validated.
     - |
       want="${CI_PROJECT_URL}.git"
-      bad=$(grep -rhoE 'repoURL: *[^ ]+|^ *- https://[^ ]+\.git' ../argocd/root-app.yaml ../argocd/bootstrap | grep -oE 'https://[^ ]+' | sort -u | grep -vxF "$want" || true)
+      bad=$(grep -rhoE 'repoURL: *[^ ]+|^ *- https://[^ ]+\.git' argocd/root-app.yaml argocd/bootstrap | grep -oE 'https://[^ ]+' | sort -u | grep -vxF "$want" || true)
       [ -z "$bad" ] || { echo "[ERROR] Argo CD repoURL must be ${want}; found: ${bad}"; exit 1; }
     - !reference [.ci-config-complete, script]
     - echo "[INFO] apply App-of-Apps root (idempotent) → ${DEPLOY_ENV}"
-    - kubectl apply -f ../argocd/root-app.yaml
+    - kubectl apply -f argocd/root-app.yaml
     - kubectl -n infra get applications.argoproj.io
   resource_group: argocd-$DEPLOY_ENV
 
@@ -123,6 +132,7 @@ argocd:bootstrap:dev:
   environment: { name: dev/argocd }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH =~ /^(dev|develop)$/
       when: manual
       <<: *argocd-changes
@@ -133,6 +143,7 @@ argocd:bootstrap:staging:
   environment: { name: staging/argocd }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH == "staging"
       when: manual
       <<: *argocd-changes
@@ -143,6 +154,7 @@ argocd:bootstrap:prod:
   environment: { name: prod/argocd }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/
       when: manual                       # controlled root apply
       <<: *argocd-changes

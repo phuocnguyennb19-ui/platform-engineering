@@ -1,0 +1,51 @@
+# GitLab Runner configuration — PROTECTED DEPLOY runner (template, not live)
+# Path on its own host: /etc/gitlab-runner/config.toml
+#
+# Runs only jobs on protected refs that hold deploy roles and SOPS keys
+# (deploy:*, helmfile:sync:*, argocd:bootstrap:*, apply:*). Unlike config.toml
+# (the build runner), job containers get NO /var/run/docker.sock: a job on this
+# runner cannot reach the host Docker daemon, and no MR or branch job can run
+# here to inspect it. Use a separate host — two runners on one host share its
+# daemon, and a socket job there could still read this runner's containers.
+#
+# Not active until registered and until jobs carry its tag (cutover in
+# ci/README.md, "Runners"). Register with:
+#
+#   docker run --rm -it \
+#     -v /etc/gitlab-runner:/etc/gitlab-runner \
+#     myorg/gitlab-runner:17.2.1 \
+#     gitlab-runner register \
+#       --non-interactive \
+#       --url "https://gitlab.com" \
+#       --token "$GITLAB_DEPLOY_RUNNER_TOKEN" \
+#       --executor "docker" \
+#       --docker-image "alpine:3.20" \
+#       --docker-privileged "false" \
+#       --description "platform-deploy-protected" \
+#       --tag-list "deploy-protected" \
+#       --run-untagged "false" \
+#       --access-level "ref_protected" \
+#       --locked "true"
+#
+# Token: never committed here — injected at registration.
+
+concurrent = 4
+check_interval = 3
+shutdown_timeout = 60
+
+[[runners]]
+  name = "platform-deploy-protected"
+  url = "https://gitlab.com"
+  executor = "docker"
+  output_limit = 32768
+
+  [runners.docker]
+    image = "alpine:3.20"
+    # No docker.sock: deploy jobs (helm, helmfile, kubectl, aws, sops) need no daemon.
+    volumes = ["/cache"]
+    privileged = false
+    # Always re-resolve the tool image so a locally cached copy cannot stand in for it.
+    pull_policy = ["always"]
+    network_mode = "bridge"
+    memory = "2g"
+    cpus = "2"

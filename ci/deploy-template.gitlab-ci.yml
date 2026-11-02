@@ -260,7 +260,7 @@ test:unit:
             restartPolicy: Never
             serviceAccountName: "${FULLNAME}"
             # The app namespaces enforce Pod Security "restricted"
-            # (platform/bootstrap/manifests/namespaces.yaml).
+            # (environments/<env>/kubernetes/namespace/namespaces.yaml).
             securityContext:
               runAsNonRoot: true
               seccompProfile:
@@ -281,7 +281,7 @@ test:unit:
                       name: "${SECRET_NAME}"
                       optional: true
                   # App secret created by ESO/SealedSecrets, the one the app pods
-                  # load through extraEnvFrom (applications/<app>/k8s/values.yaml).
+                  # load through extraEnvFrom (applications/<app>/k8s/<env>/values.yaml).
                   - secretRef:
                       name: "${SERVICE_NAME}"
                       optional: true
@@ -302,7 +302,7 @@ test:unit:
 
 # ============================================================
 # STAGE — PROMOTE (copy by digest into the target environment's ECR)
-# Follows the terraform/environments chain: dev → staging → production. The
+# Follows the environments/<dir>/terraform promotion chain: dev → staging → production. The
 # target account may pull only from the environment before it, so a prod
 # deploy needs the same commit to have been promoted to staging first
 # (fast-forward staging → main keeps the SHA).

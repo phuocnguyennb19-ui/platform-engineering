@@ -1,12 +1,20 @@
 locals {
-  environments_dir = "${var.config_root}/environments"
+  # Each environment is <config_root>/<dir>/terraform/. The folder carries the Helm name (prod);
+  # the Terraform name is the `environment:` field of its environment.yaml (production), so the
+  # selected environment is found by that field — the folder name is never translated by hand.
+  env_files = {
+    for f in fileset(var.config_root, "*/terraform/environment.yaml") :
+    dirname(dirname(f)) => try(yamldecode(file("${var.config_root}/${f}")), {})
+  }
+  env_dir          = try(coalesce(one([for d, e in local.env_files : d if try(tostring(e.environment), "") == var.environment]), var.environment), var.environment)
+  environment_dir  = "${var.config_root}/${local.env_dir}/terraform"
   applications_dir = coalesce(var.applications_root, "${var.config_root}/applications")
-  env_path         = "infra-base/terraform/environments/${var.environment}"
+  env_path         = "environments/${local.env_dir}/terraform"
 
   env_raw = {
     for k in ["environment", "core", "backend"] : k => yamldecode(
-      fileexists("${local.environments_dir}/${var.environment}/${k}.yaml")
-      ? (trimspace(file("${local.environments_dir}/${var.environment}/${k}.yaml")) == "" ? "{}" : file("${local.environments_dir}/${var.environment}/${k}.yaml"))
+      fileexists("${local.environment_dir}/${k}.yaml")
+      ? (trimspace(file("${local.environment_dir}/${k}.yaml")) == "" ? "{}" : file("${local.environment_dir}/${k}.yaml"))
       : "{}"
     )
   }
@@ -15,10 +23,8 @@ locals {
   core        = local.env_docs.core
   backend     = local.env_docs.backend
 
-  all_environments = {
-    for f in fileset(local.environments_dir, "*/environment.yaml") :
-    dirname(f) => try(yamldecode(file("${local.environments_dir}/${f}")), {})
-  }
+  # keyed by Terraform environment name (promote_from, <app>/terraform/<environment>.yaml)
+  all_environments = { for d, e in local.env_files : try(tostring(e.environment), d) => e }
 
   account_id     = try(tostring(local.environment.account.id), "")
   region         = try(tostring(local.environment.region.name), "")
@@ -40,7 +46,7 @@ locals {
   ]
 
   environment_errors = concat(
-    [for k in ["environment", "core", "backend"] : "${local.env_path}/${k}.yaml does not exist" if !fileexists("${local.environments_dir}/${var.environment}/${k}.yaml")],
+    [for k in ["environment", "core", "backend"] : "${local.env_path}/${k}.yaml does not exist" if !fileexists("${local.environment_dir}/${k}.yaml")],
     try(tostring(local.environment.environment), "") == var.environment ? [] : ["${local.env_path}/environment.yaml: environment must be \"${var.environment}\""],
     can(regex("^[0-9]{12}$", local.account_id)) ? [] : ["${local.env_path}/environment.yaml: account.id must be the 12-digit AWS account ID, quoted"],
     can(regex("^[a-z]{2}(-gov)?-[a-z]+-[0-9]$", local.region)) ? [] : ["${local.env_path}/environment.yaml: region.name must be an AWS region"],
@@ -60,7 +66,8 @@ locals {
   )
 
   # Each application keeps its Terraform config in <applications_dir>/<app>/terraform/.
-  app_files = fileset(local.applications_dir, "*/terraform/*.yaml")
+  # A folder starting with `_` (applications/_template) is not an application.
+  app_files = [for f in fileset(local.applications_dir, "*/terraform/*.yaml") : f if !startswith(f, "_")]
   app_dirs  = toset([for f in local.app_files : split("/", f)[0]])
 
   apps = {
@@ -236,11 +243,6 @@ locals {
 
   log_retention_values = [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
   open_cidrs           = ["0.0.0.0/0", "::/0"]
-  is_int               = { for k, v in(local.a == null ? {} : {
-    ephemeral_storage_gb = coalesce(local.a.ephemeral_storage_gb, 21)
-    cpu_target           = local.a.autoscaling_cpu_target
-    memory_target        = local.a.autoscaling_memory_target
-  }) : k => floor(v) == v }
 
   fargate_memory = {
     "256"   = [512, 1024, 2048]
@@ -293,15 +295,15 @@ locals {
   hc = local.a == null ? null : local.a.target_group.health_check
 
   ecs_errors = local.a == null ? [] : concat(
-    local.a.ephemeral_storage_gb == null || try(local.a.ephemeral_storage_gb >= 21 && local.a.ephemeral_storage_gb <= 200 && local.is_int.ephemeral_storage_gb, false) ? [] : ["${local.app_path}: resources.ephemeral_storage_gb must be an integer between 21 and 200"],
+    local.a.ephemeral_storage_gb == null || try(local.a.ephemeral_storage_gb >= 21 && local.a.ephemeral_storage_gb <= 200 && floor(local.a.ephemeral_storage_gb) == local.a.ephemeral_storage_gb, false) ? [] : ["${local.app_path}: resources.ephemeral_storage_gb must be an integer between 21 and 200"],
     contains(["X86_64", "ARM64"], local.a.architecture) ? [] : ["${local.app_path}: resources.architecture must be X86_64 or ARM64"],
     local.a.minimum_healthy_percent >= 0 && local.a.minimum_healthy_percent <= 100 ? [] : ["${local.app_path}: deployment.minimum_healthy_percent must be between 0 and 100"],
     local.a.maximum_percent >= 100 && local.a.maximum_percent <= 200 ? [] : ["${local.app_path}: deployment.maximum_percent must be between 100 and 200"],
     local.a.health_check_grace_period_seconds >= 0 && local.a.health_check_grace_period_seconds <= 2147483647 ? [] : ["${local.app_path}: deployment.health_check_grace_period_seconds must not be negative"],
     can(regex("^(LATEST|[0-9]+\\.[0-9]+\\.[0-9]+)$", local.a.platform_version)) ? [] : ["${local.app_path}: deployment.platform_version must be LATEST or a version such as 1.4.0"],
-    local.a.log_retention_days == null || contains(local.log_retention_values, local.a.log_retention_days) ? [] : ["${local.app_path}: deployment.log_retention_days must be one of ${join(", ", local.log_retention_values)}"],
-    local.a.autoscaling_cpu_target >= 1 && local.a.autoscaling_cpu_target <= 100 && local.is_int.cpu_target ? [] : ["${local.app_path}: deployment.autoscaling.cpu_target must be an integer between 1 and 100"],
-    local.a.autoscaling_memory_target >= 1 && local.a.autoscaling_memory_target <= 100 && local.is_int.memory_target ? [] : ["${local.app_path}: deployment.autoscaling.memory_target must be an integer between 1 and 100"],
+    contains(local.log_retention_values, coalesce(local.a.log_retention_days, 1)) ? [] : ["${local.app_path}: deployment.log_retention_days must be one of ${join(", ", local.log_retention_values)}"],
+    local.a.autoscaling_cpu_target >= 1 && local.a.autoscaling_cpu_target <= 100 && floor(local.a.autoscaling_cpu_target) == local.a.autoscaling_cpu_target ? [] : ["${local.app_path}: deployment.autoscaling.cpu_target must be an integer between 1 and 100"],
+    local.a.autoscaling_memory_target >= 1 && local.a.autoscaling_memory_target <= 100 && floor(local.a.autoscaling_memory_target) == local.a.autoscaling_memory_target ? [] : ["${local.app_path}: deployment.autoscaling.memory_target must be an integer between 1 and 100"],
     local.a.autoscaling_scale_in_cooldown >= 0 && local.a.autoscaling_scale_out_cooldown >= 0 ? [] : ["${local.app_path}: deployment.autoscaling cooldowns must not be negative"],
     [for k in keys(local.a.capacity_providers) : "${local.app_path}: deployment.capacity_providers.${k} must be FARGATE or FARGATE_SPOT" if !contains(["FARGATE", "FARGATE_SPOT"], k)],
     [for k, v in local.a.capacity_providers : "${local.app_path}: deployment.capacity_providers.${k} needs weight >= 0 and base >= 0" if v.weight < 0 || v.base < 0],

@@ -9,36 +9,28 @@ build: trang HTML và cấu hình nginx nằm trong ConfigMap, server là image 
 | Image | `nginxinc/nginx-unprivileged:1.30.5-alpine-slim`, ghim digest `sha256:7f79f463c6eb0d0bf8782992bb9636434398e3e5848398805aef2c9b025d8609` |
 | Cổng | 8080 (`http`); `/healthz` cho probe |
 | Host | dev `frontend-html.dev.example.com` · staging `frontend-html.staging.example.com` · prod `frontend-html.example.com` · local `frontend-html.localhost` |
-| Nội dung | `extraConfigMaps.site` trong `k8s/values.yaml` (`index.html`, `default.conf`); ngoài `/healthz`, mọi đường dẫn đều trả `index.html` (fallback cho SPA) |
+| Nội dung | `extraConfigMaps.site` trong mỗi `k8s/<env>/values.yaml` (`index.html`, `default.conf`); ngoài `/healthz`, mọi đường dẫn đều trả `index.html` (fallback cho SPA) |
 
 ## Các file
 
 | File | Nội dung |
 |---|---|
-| `k8s/values.yaml` | image, ConfigMap (HTML + nginx), volume, probe, resources, Reloader |
-| `k8s/dev/`, `k8s/staging/`, `k8s/prod/` `values.yaml` | Ingress (host, TLS, issuer) từng môi trường AWS |
-| `k8s/local/values.yaml` | minikube: image từ docker.io, host `frontend-html.localhost` (`local/apps/helmfile.yaml.gotmpl` tự nhận) |
-| `k8s/onprem-dev/`, `k8s/onprem-staging/`, `k8s/onprem-prod/` `values.yaml` | cluster on-prem: host trong zone DNS của site + issuer `onprem-ca`; registry của site do `infra-base/k8s/env-values/onprem-<env>` đặt. Xem trước: `make app-render APP=frontend-html ENV=onprem-prod` |
+| `k8s/<env>/values.yaml` | **toàn bộ** value của app ở môi trường đó — mỗi file đầy đủ: image, ConfigMap (HTML + nginx), volume, probe, resources, Reloader, Ingress. Sửa phần chung (vd HTML) thì sửa ở mọi file |
+| `k8s/dev/`, `k8s/staging/`, `k8s/prod/` | môi trường AWS: Ingress (host, TLS, issuer) riêng |
 | `terraform/app.yaml`, `terraform/<env>.yaml` | repository ECR `frontend-html` ở dev/staging/production |
 
-## Thử local
+## Thử trên cluster laptop
+
+Chỉ có value dev/staging/prod. Chạy trên laptop = trỏ `dev` vào cluster laptop trong
+`environments/<env>/kubernetes/cluster/target.local.yaml` (vd `dev: { cluster: docker-desktop-dev }`), rồi từ gốc repo:
 
 ```bash
-minikube start --kubernetes-version=v1.32.12 --addons=ingress --addons=metrics-server
-cd local
-helmfile -e local -l layer=platform sync
-helmfile -e local -l name=frontend-html sync
-kubectl --context=minikube -n local rollout status deploy/frontend-html-application --timeout=120s
-minikube tunnel        # chạy ở terminal khác
-curl -s http://frontend-html.localhost/healthz      # ok
+helmfile -e dev -l name=frontend-html diff
+helmfile -e dev -l name=frontend-html sync
 ```
 
-Đổi HTML (local không có Reloader):
-
-```bash
-helmfile -e local -l name=frontend-html sync
-kubectl --context=minikube -n local rollout restart deploy/frontend-html-application
-```
+Value dev kéo image từ ECR của dev (`global.imageRegistry`): cluster laptop cần quyền pull ECR,
+hoặc đặt `image.registry` cho image công khai trong `k8s/dev/values.yaml`.
 
 ## Thử trên AWS (dev)
 
@@ -65,12 +57,11 @@ Prod không tự sync: `argocd app diff frontend-html-prod`, sau đó sync tay.
 - Kyverno `require-trusted-registry` (Enforce) chưa cho phép ECR, nên pod sẽ bị chặn trên AWS cho tới khi policy thêm host ECR. Lỗi này ảnh hưởng mọi app, đã nêu trong review.
 - Resources của app (10m/32Mi) thấp hơn mức sàn tier prod: app này cố ý chỉ dùng để thử.
 
-## On-prem
+## Cluster khác (on-prem, K3s…)
 
-Cùng release với AWS (cùng digest, ConfigMap, probe); chỉ khác registry, host, issuer.
-Trước khi chạy trên cluster on-prem cần: điền các `REPLACE_WITH_ONPREM_<ENV>_*`, copy image
-theo digest vào registry của site (`<registry>/frontend-html:1.30.5-alpine-slim`), và phần platform
-on-prem (cert-manager CA issuer `onprem-ca`, ApplicationSet chọn target) đã được duyệt và áp.
+Không có value riêng cho on-prem: cluster đó là deploy target của `dev`/`staging`/`prod`
+trong `environments/<env>/kubernetes/cluster/target.local.yaml`. Image phải pull được từ cluster đó (ECR của
+môi trường, hoặc `image.registry` trỏ registry khác trong `k8s/<env>/values.yaml`).
 
 ## Vì sao config như vậy
 

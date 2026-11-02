@@ -13,19 +13,19 @@
 #   age-keygen -o staging.agekey              # public key is printed; store the private
 #                                             # key only in the protected CI variable
 #   terraform -chdir=terraform/stacks/core output sops_kms_key_arn   # production
-#   sops updatekeys infra-base/k8s/env-values/<env>/secrets.enc.yaml
+#   sops updatekeys environments/<env>/kubernetes/secrets.enc.yaml
 #
 # The three files were first encrypted with one shared key, so after
 # re-encrypting staging and production, rotate the secret VALUES too: the old
 # ciphertext stays readable in git history by anyone holding that key.
 
 creation_rules:
-  - path_regex: ^infra-base/k8s/env-values/dev/secrets\.enc\.yaml$
+  - path_regex: ^environments/dev/kubernetes/secrets\.enc\.yaml$
     age: age199t5762rgtsa47yamz6ux86jpm6df95ewq5wuug9cahudgf73dmqx9dse9
 
-  - path_regex: ^infra-base/k8s/env-values/staging/secrets\.enc\.yaml$
+  - path_regex: ^environments/staging/kubernetes/secrets\.enc\.yaml$
     age: REPLACE_WITH_STAGING_AGE_PUBLIC_KEY
 
-  - path_regex: ^infra-base/k8s/env-values/prod/secrets\.enc\.yaml$
+  - path_regex: ^environments/prod/kubernetes/secrets\.enc\.yaml$
     kms: REPLACE_WITH_PRODUCTION_SOPS_KMS_KEY_ARN
     age: REPLACE_WITH_PRODUCTION_AGE_PUBLIC_KEY

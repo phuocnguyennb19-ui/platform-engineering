@@ -1,7 +1,7 @@
 module "config" {
   source = "../../shared/config"
 
-  config_root       = "${path.root}/../../../infra-base/terraform"
+  config_root       = "${path.root}/../../../environments"
   applications_root = "${path.root}/../../../applications"
   environment       = var.environment
   application       = var.application
@@ -107,10 +107,17 @@ module "ecs_service" {
   name               = local.name
   cluster_arn        = local.core.ecs_cluster_arn
   subnet_ids         = local.core.private_subnet_ids
-  security_group_ids = [local.core.ecs_security_group_id]
+  security_group_ids = concat([local.core.ecs_security_group_id], [for sg in aws_security_group.extra : sg.id])
 
-  cpu    = local.app.cpu
-  memory = local.app.memory
+  cpu                  = local.app.cpu
+  memory               = local.app.memory
+  ephemeral_storage_gb = local.app.ephemeral_storage_gb
+  cpu_architecture     = local.app.architecture
+  platform_version     = local.app.platform_version
+
+  capacity_provider_strategy = {
+    for k, v in local.app.capacity_providers : k => { capacity_provider = k, weight = v.weight, base = v.base }
+  }
 
   containers = {
     (var.application) = {
@@ -140,13 +147,26 @@ module "ecs_service" {
   autoscaling_min_capacity = local.app.autoscaling_enabled ? local.app.autoscaling_min : local.app.replicas
   autoscaling_max_capacity = local.app.autoscaling_enabled ? local.app.autoscaling_max : local.app.replicas
 
+  autoscaling_cpu_target         = local.app.autoscaling_cpu_target
+  autoscaling_memory_target      = local.app.autoscaling_memory_target
+  autoscaling_scale_in_cooldown  = local.app.autoscaling_scale_in_cooldown
+  autoscaling_scale_out_cooldown = local.app.autoscaling_scale_out_cooldown
+
+  deployment_minimum_healthy_percent = local.app.minimum_healthy_percent
+  deployment_maximum_percent         = local.app.maximum_percent
+  enable_circuit_breaker             = local.app.circuit_breaker
+  health_check_grace_period_seconds  = local.app.health_check_grace_period_seconds
+
+  tasks_iam_role_policies   = { for i, arn in local.app.iam_policy_arns : "policy${i}" => arn }
+  tasks_iam_role_statements = local.app.iam_statements
+
   target_group_arn             = one([for tg in aws_lb_target_group.this : tg.arn])
   enable_load_balancer         = length(local.routes) > 0
   load_balancer_container_name = length(local.routes) > 0 ? var.application : null
   load_balancer_container_port = length(local.routes) > 0 ? local.app.port : null
 
-  enable_execute_command = local.core.enable_execute_command
-  log_retention_days     = local.core.log_retention_days
+  enable_execute_command = coalesce(local.app.execute_command, local.core.enable_execute_command)
+  log_retention_days     = coalesce(local.app.log_retention_days, local.core.log_retention_days)
 
   tags = local.tags
 
@@ -163,16 +183,23 @@ resource "aws_lb_target_group" "this" {
   protocol             = "HTTP"
   target_type          = "ip"
   vpc_id               = local.core.vpc_id
-  deregistration_delay = 30
+  deregistration_delay = local.app.target_group.deregistration_delay
+  slow_start           = local.app.target_group.slow_start
+
+  stickiness {
+    enabled         = local.app.target_group.stickiness_enabled
+    type            = "lb_cookie"
+    cookie_duration = local.app.target_group.stickiness_duration
+  }
 
   health_check {
     enabled             = true
-    path                = coalesce(local.app.health_check_path, "/")
-    matcher             = "200-399"
-    interval            = 15
-    timeout             = 5
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
+    path                = coalesce(local.app.target_group.health_check.path, local.app.health_check_path, "/")
+    matcher             = local.app.target_group.health_check.matcher
+    interval            = local.app.target_group.health_check.interval
+    timeout             = local.app.target_group.health_check.timeout
+    healthy_threshold   = local.app.target_group.health_check.healthy_threshold
+    unhealthy_threshold = local.app.target_group.health_check.unhealthy_threshold
   }
 
   tags = local.tags
@@ -180,6 +207,39 @@ resource "aws_lb_target_group" "this" {
   lifecycle {
     create_before_destroy = true
   }
+}
+
+# Only for network.security_group.ingress: ALB → container.port is already allowed by the core ECS group.
+resource "aws_security_group" "extra" {
+  for_each = local.is_ecs && length(local.app.ingress_rules) > 0 ? toset(["this"]) : toset([])
+
+  name_prefix = "${local.name}-"
+  description = "Extra ingress for ${local.name}"
+  vpc_id      = local.core.vpc_id
+
+  tags = merge(local.tags, { Name = "${local.name}-extra" })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "extra" {
+  for_each = {
+    for p in flatten([
+      for i, r in local.app.ingress_rules : [for c in r.cidr_blocks : merge(r, { key = "${r.protocol}-${r.port}-${c}", cidr = c })]
+    ]) : p.key => p if local.is_ecs
+  }
+
+  security_group_id = aws_security_group.extra["this"].id
+  ip_protocol       = each.value.protocol
+  from_port         = each.value.port
+  to_port           = each.value.port
+  cidr_ipv4         = strcontains(each.value.cidr, ":") ? null : each.value.cidr
+  cidr_ipv6         = strcontains(each.value.cidr, ":") ? each.value.cidr : null
+  description       = each.value.description == "" ? null : each.value.description
+
+  tags = local.tags
 }
 
 resource "aws_lb_listener_rule" "this" {

@@ -1,0 +1,24 @@
+# Karpenter — AWS EKS node autoscaling (controller)
+# REQUIRES (cluster-specific, set before deploy):
+#   - EKS cluster name + IRSA role ARN
+#   - SQS interruption queue
+#   - subnet/SG discovery tags: karpenter.sh/discovery=<clusterName>
+# NodePool + EC2NodeClass: karpenter/manifests/nodepool.yaml (apply after).
+
+settings:
+  clusterName: {{ .Values.eksClusterName }}
+  interruptionQueue: karpenter-prod         # ← SQS queue name
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::{{ requiredEnv "AWS_ACCOUNT_ID" }}:role/{{ .Values.eksClusterName }}-irsa-karpenter
+
+controller:
+  resources:
+    requests: { cpu: 500m, memory: 512Mi }
+    limits:   { cpu: "1", memory: 1Gi }
+
+serviceMonitor:
+  enabled: true
+
+replicas: 2

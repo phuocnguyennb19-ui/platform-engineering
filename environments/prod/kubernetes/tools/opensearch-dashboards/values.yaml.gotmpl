@@ -1,0 +1,66 @@
+# ============================================================
+# OpenSearch Dashboards — UI for OpenSearch
+# Chart: opensearch/opensearch-dashboards
+#
+# Connects to the cluster at https://opensearch-cluster-master:9200
+# Exposed via Ingress at dashboards.<domain> (TLS in staging/prod).
+# ============================================================
+
+opensearchHosts: "https://opensearch-cluster-master.{{ (.Values.namespace) }}.svc.{{ (.Values.clusterDomain) }}:9200"
+
+# Dashboards → OpenSearch auth. Credentials come from a SOPS secret,
+# never inline.
+extraEnvs:
+  - name: OPENSEARCH_USERNAME
+    value: admin
+  - name: OPENSEARCH_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: opensearch-admin
+        key: password
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+podSecurityContext:
+  fsGroup: 1000
+
+ingress:
+  enabled: true
+  ingressClassName: {{ .Values.ingressClass }}
+  hosts:
+    - host: dashboards.{{ .Values.ingressDomain }}
+      paths:
+        - path: /
+          # Empty backend → chart defaults to this release's service + port.
+          backend:
+            serviceName: ""
+            servicePort: ""
+  annotations:
+    # Kong: HTTPS only, plain HTTP → 308 (was nginx ssl-redirect "true"); 8 MB body limit
+    # (was ingress-nginx proxy-body-size 8m, controller-wide) — KongClusterPlugin in
+    # kubernetes/releases/platform/kong/manifests/plugins.yaml.
+    konghq.com/protocols: "https"
+    konghq.com/https-redirect-status-code: "308"
+    konghq.com/plugins: "request-size-limit"
+  tls:
+    - secretName: opensearch-dashboards-tls
+      hosts:
+        - dashboards.{{ .Values.ingressDomain }}
+replicaCount: 2
+
+resources:
+  requests: { cpu: 200m, memory: 512Mi }
+  limits:   { cpu: 1, memory: 1Gi }
+
+config:
+  opensearch_dashboards.yml: |
+    server.name: opensearch-dashboards
+    server.host: "0.0.0.0"
+    # dev: skip verify (demo cert) · staging/prod: full verify (requires a real CA).
+    opensearch.ssl.verificationMode: full
+    opensearch.requestHeadersWhitelist: [authorization, securitytenant]
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

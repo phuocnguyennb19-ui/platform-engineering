@@ -1,0 +1,124 @@
+# ============================================================
+# Kong Gateway — API gateway + Gateway API controller (DB-less)
+# Chart: kong/kong · ns `infra`
+#
+# Role: THE ingress controller of the cluster (ingress-nginx is being retired —
+# state.yaml ingressNginx, cutover in kubernetes/releases/platform/kong/README.md §8).
+# Every platform UI and every app uses classic Ingress with ingressClassName `kong`
+# (state.yaml ingressClass); Gateway API (GatewayClass `kong`) is also implemented.
+# Gateway features (auth, rate-limit, transformations, mTLS) come from plugins.
+#
+# DB-less + declarative: no PostgreSQL dependency; config comes from CRDs
+# (KongPlugin, KongConsumer, HTTPRoute) reconciled by the built-in controller.
+# This keeps Kong stateless and GitOps-friendly.
+#
+# What lives where:
+#   values.yaml.gotmpl  → proxy/controller, Gateway API, TLS, sizing
+#   manifests/plugins.yaml → declarative plugins as KongClusterPlugin CRs, rendered into
+#                         this release (chart extraObjects) by
+#                         kubernetes/releases/platform/kong/extra-objects.yaml.gotmpl —
+#                         one sync installs Kong and its plugins together.
+#   Secret (SOPS)       → plugin credentials (JWT/keys) referenced by CRs
+# ============================================================
+
+fullnameOverride: kong
+
+# ── Controller (ingress + Gateway API reconciler) ───────────
+ingressController:
+  enabled: true
+  ingressClass: kong
+  gatewayDiscovery:
+    enabled: false
+  env:
+    # Gateway API v1 (Gateway/HTTPRoute) needs no gate in KIC 3.x. GatewayAlpha adds the
+    # alpha route kinds (TCPRoute/UDPRoute/TLSRoute), which need the EXPERIMENTAL-channel
+    # CRDs; gateway-api installs the standard channel, so today this gate has nothing to
+    # watch. Kept so those kinds work if the experimental CRDs are ever installed.
+    feature_gates: "GatewayAlpha=true"
+    publish_service: infra/kong-proxy
+
+# ── DB-less ─────────────────────────────────────────────────
+# ── DB-less ─────────────────────────────────────────────────
+env:
+  database: "off"
+  router_flavor: expressions
+  log_level: info
+
+# ── Proxy (data plane) ──────────────────────────────────────
+# ── Proxy (data plane) ──────────────────────────────────────
+proxy:
+  tls:
+    enabled: true
+  # LB type left as it is today (no aws-load-balancer-type annotation → whatever the live
+  #   kong-proxy Service already has, a Classic ELB under the in-tree controller). Adding
+  #   `aws-load-balancer-type: nlb` would REPLACE the LB: new address, `api.` and every Ingress
+  #   record repointed. Check first (kubectl -n infra get svc kong-proxy) and do it as its
+  #   own change if wanted.
+  # ⚠ helmDefaults sets `wait: true`: a LoadBalancer Service blocks the release until it gets
+  #   an address. Every dev target here has an LB provider (EKS, Docker Desktop, K3s servicelb);
+  #   on kind/minikube use `minikube tunnel` / metallb, or override type: NodePort locally.
+  type: LoadBalancer
+  # Port 80 is ON in every env. Kong is the only ingress controller, and port 80 carries
+  #   - cert-manager ACME HTTP-01 (solver Ingress /.well-known/acme-challenge/, class kong),
+  #   - the http→https redirect: Ingresses set konghq.com/protocols: https +
+  #     konghq.com/https-redirect-status-code: "308", so a plain-HTTP request is
+  #     redirected rather than served. Nothing is served in clear text unless an Ingress
+  #     explicitly allows protocol http. TLS (443) stays enabled.
+  http:
+    enabled: true
+  # Only annotate where a real LB exists. At dev this would publish an A record
+  # for api.<domain> pointing at a Service that never gets an address.
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: "api.{{ .Values.ingressDomain }}"
+
+autoscaling:
+  targetCPUUtilizationPercentage: 70
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 3
+
+podDisruptionBudget:
+  minAvailable: 1
+  enabled: false
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: kong
+
+# ── Hardening ───────────────────────────────────────────────
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  seccompProfile: { type: RuntimeDefault }
+  capabilities: { drop: [ ALL ] }
+
+# ── Admin API stays cluster-internal (no public control plane) ──
+admin:
+  enabled: true
+  type: ClusterIP
+  http:
+    enabled: false
+  tls:
+    enabled: true
+
+manager:
+  enabled: false                       # Kong Manager UI off (use CRDs/git)
+
+# ── Metrics (Prometheus plugin exposes /metrics) ────────────
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+replicaCount: 2
+resources:
+  requests: { cpu: 200m, memory: 512Mi }
+  limits:   { cpu: 1, memory: 1Gi }

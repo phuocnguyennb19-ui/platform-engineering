@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "infra-base/terraform/environments/<env>/backend.yaml",
+  "title": "environments/<env>/terraform/backend.yaml",
   "type": "object",
   "additionalProperties": false,
   "required": ["bucket", "region", "encrypt", "use_lockfile"],

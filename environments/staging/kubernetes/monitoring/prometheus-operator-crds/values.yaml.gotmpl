@@ -1,0 +1,8 @@
+# prometheus-operator-crds — the monitoring.coreos.com CRDs (ServiceMonitor, PodMonitor,
+# PrometheusRule, Probe, …) that kube-prometheus-stack (crds.enabled: false) and most tools use.
+
+# Keep the CRDs when this release is uninstalled: deleting a CRD deletes every object of that
+# kind in the cluster (every ServiceMonitor / PrometheusRule of every tool and app).
+crds:
+  annotations:
+    helm.sh/resource-policy: keep

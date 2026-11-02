@@ -1,0 +1,199 @@
+{{- /*
+Workers — background consumers, schedulers, anything that is not the HTTP
+surface of the service. Each worker gets its OWN component selector, so the
+app's Service / PDB / NetworkPolicy can never capture worker pods.
+
+Everything a worker does not set is inherited from the root values
+(image, security context, volumes, scheduling, env, envFrom, probes...).
+*/ -}}
+{{- range $w := .Values.workers }}
+{{- if $w.enabled }}
+{{- $c := include "application.componentConfig" (dict "root" $ "overrides" (omit $w "enabled" "name" "replicaCount" "autoscaling" "keda" "podDisruptionBudget" "service" "serviceMonitor")) | fromYaml }}
+{{- $fullname := printf "%s-%s" (include "application.fullname" $) $w.name | trunc 63 | trimSuffix "-" }}
+{{- $selector := include "application.componentSelectorLabels" (dict "root" $ "component" "worker" "name" $w.name) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "application.namespace" $ }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "worker" "name" $w.name) | nindent 4 }}
+  {{- $ann := include "application.annotations" $ | trim }}
+  {{- if $ann }}
+  annotations:
+    {{- $ann | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if not (or (and $w.autoscaling $w.autoscaling.enabled) (and $w.keda $w.keda.enabled)) }}
+  replicas: {{ $w.replicaCount | default 1 }}
+  {{- end }}
+  revisionHistoryLimit: {{ $.Values.workload.revisionHistoryLimit }}
+  progressDeadlineSeconds: {{ $.Values.workload.progressDeadlineSeconds }}
+  minReadySeconds: {{ $.Values.workload.minReadySeconds }}
+  strategy:
+    type: {{ (($w.strategy).type) | default $.Values.workload.strategy.type }}
+    {{- if eq ((($w.strategy).type) | default $.Values.workload.strategy.type) "RollingUpdate" }}
+    rollingUpdate:
+      {{- toYaml (($w.strategy).rollingUpdate | default $.Values.workload.strategy.rollingUpdate) | nindent 6 }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  template:
+    metadata:
+      {{- include "application.podTemplateMetadata" (dict "root" $ "c" $c "component" "worker" "name" $w.name) | trim | nindent 6 }}
+    spec:
+      {{- include "application.podSpec" (dict "root" $ "c" $c "component" "worker" "name" $w.name "httpPort" false) | trim | nindent 6 }}
+
+{{- /* ── Optional per-worker Service (metrics / gRPC / internal endpoints) ── */}}
+{{- if and $w.service $w.service.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "application.namespace" $ }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "worker" "name" $w.name) | nindent 4 }}
+  {{- with $w.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $w.service.type | default "ClusterIP" }}
+  {{- if $w.service.headless }}
+  clusterIP: None
+  {{- end }}
+  ports:
+    {{- range ($w.service.ports | default ($c.extraPorts | default list)) }}
+    - name: {{ .name }}
+      port: {{ .port | default .containerPort }}
+      targetPort: {{ .targetPort | default .name }}
+      protocol: {{ .protocol | default "TCP" }}
+    {{- end }}
+  selector:
+    {{- $selector | nindent 4 }}
+{{- end }}
+
+{{- /* ── Optional per-worker ServiceMonitor ─────────────────────────────── */}}
+{{- if and $w.serviceMonitor $w.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "application.namespace" $ }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "worker" "name" $w.name) | nindent 4 }}
+    {{- with ($w.serviceMonitor.labels | default $.Values.serviceMonitor.labels) }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  endpoints:
+    - port: {{ $w.serviceMonitor.port | default "metrics" }}
+      path: {{ $w.serviceMonitor.path | default "/metrics" }}
+      interval: {{ $w.serviceMonitor.interval | default $.Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ $w.serviceMonitor.scrapeTimeout | default $.Values.serviceMonitor.scrapeTimeout }}
+{{- end }}
+
+{{- /* ── Per-worker HPA ─────────────────────────────────────────────────── */}}
+{{- if and $w.autoscaling $w.autoscaling.enabled }}
+---
+apiVersion: {{ include "application.hpa.apiVersion" $ }}
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "application.namespace" $ }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "worker" "name" $w.name) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullname }}
+  minReplicas: {{ $w.autoscaling.minReplicas | default 1 }}
+  maxReplicas: {{ $w.autoscaling.maxReplicas | default 5 }}
+  metrics:
+    {{- if $w.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ $w.autoscaling.targetCPUUtilizationPercentage }} }
+    {{- end }}
+    {{- if $w.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: {{ $w.autoscaling.targetMemoryUtilizationPercentage }} }
+    {{- end }}
+    {{- with $w.autoscaling.customMetrics }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with ($w.autoscaling.behavior | default $.Values.autoscaling.behavior) }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+
+{{- /* ── Per-worker KEDA ScaledObject ───────────────────────────────────
+       This is the one that matters for queue consumers: the ScaledObject must
+       target the WORKER Deployment, not the application Deployment. */}}
+{{- if and $w.keda $w.keda.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "application.namespace" $ }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "worker" "name" $w.name) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullname }}
+  minReplicaCount: {{ $w.keda.minReplicaCount | default 1 }}
+  maxReplicaCount: {{ $w.keda.maxReplicaCount | default 10 }}
+  pollingInterval: {{ $w.keda.pollingInterval | default 30 }}
+  cooldownPeriod: {{ $w.keda.cooldownPeriod | default 300 }}
+  {{- with $w.keda.idleReplicaCount }}
+  idleReplicaCount: {{ . }}
+  {{- end }}
+  {{- with $w.keda.fallback }}
+  fallback:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $w.keda.advanced }}
+  advanced:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  triggers:
+    {{- toYaml (required (printf "workers[%s].keda.triggers is required when keda is enabled" $w.name) $w.keda.triggers) | nindent 4 }}
+{{- end }}
+
+{{- /* ── Per-worker PDB ─────────────────────────────────────────────────── */}}
+{{- if and $w.podDisruptionBudget $w.podDisruptionBudget.enabled }}
+---
+apiVersion: {{ include "application.pdb.apiVersion" $ }}
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "application.namespace" $ }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "worker" "name" $w.name) | nindent 4 }}
+spec:
+  {{- include "application.pdb.budget" (dict "pdb" $w.podDisruptionBudget "what" (printf "workers[%s].podDisruptionBudget" $w.name)) | nindent 2 }}
+  {{- with $w.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+{{- end }}
+
+{{- end }}
+{{- end }}

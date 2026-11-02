@@ -1,0 +1,89 @@
+# ============================================================
+# Falco — runtime threat detection (syscall / eBPF)
+# Chart: falcosecurity/falco · ns `falco`
+#
+# DaemonSet on every node; reads kernel events via modern eBPF probe and
+# evaluates Falco rules (unexpected shells in containers, sensitive mounts,
+# outbound to C2, package installs, etc.). Alerts fan out to Falcosidekick.
+#
+# Why eBPF (modern_ebpf) over the kernel module: no per-node DKMS build,
+# works on managed nodes (EKS/GKE), CO-RE portable. Needs privileged PSA.
+#
+# Alerting path:
+#   falco → falcosidekick → Alertmanager (kube-prometheus-stack) + Loki
+#   Metrics scraped by Prometheus (ServiceMonitor).
+#
+# What lives where:
+#   values.yaml.gotmpl → driver, outputs, sidekick, sizing
+#   files/            → custom rules via `customRules` (mounted as ConfigMap)
+#   Secret             → sidekick webhook tokens (Slack/PagerDuty) via SOPS
+# ============================================================
+
+driver:
+  enabled: true
+  kind: modern_ebpf                    # CO-RE eBPF; no kernel headers needed
+
+collectors:
+  kubernetes:
+    enabled: true                      # enrich events with k8s metadata
+
+# ── Falco engine outputs ────────────────────────────────────
+# ── Falco engine outputs ────────────────────────────────────
+falco:
+  json_output: true
+  json_include_output_property: true
+  # Rate-limit noisy rules.
+  outputs:
+    rate: 1
+    max_burst: 1000
+  syscall_event_drops:
+    actions: [ log, alert ]
+    rate: 0.03333
+    max_burst: 10
+  log_level: warning
+  priority: notice
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+# ── Custom rules: mounted as ConfigMap from files/rules/ ───
+# The rule bodies live in files/rules/custom_rules.yaml (source of truth);
+# the chart renders this map into a ConfigMap and mounts it into /etc/falco.
+customRules:
+  custom_rules.yaml: |-
+{{ readFile "files/rules/custom_rules.yaml" | indent 4 }}
+
+# ── Falcosidekick — routing to Alertmanager + Loki ──────────
+# ── Falcosidekick — routing to Alertmanager + Loki ──────────
+falcosidekick:
+  enabled: true
+  config:
+    alertmanager:
+      hostport: http://kube-prometheus-stack-alertmanager.observability.svc.{{ .Values.clusterDomain }}:9093
+      minimumpriority: notice
+    loki:
+      hostport: http://loki-gateway.observability.svc.{{ .Values.clusterDomain }}
+      minimumpriority: debug
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+  replicaCount: 2
+  webui:
+    enabled: true
+
+# ── Metrics ─────────────────────────────────────────────────
+metrics:
+  enabled: true
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+
+# ── Container security (DaemonSet needs host visibility) ────
+podSecurityContext:
+  runAsNonRoot: false                  # driver needs privileged host access
+containerSecurityContext:
+  privileged: true                     # required for syscall capture
+tolerations:
+  - operator: Exists                   # run on every node incl. tainted/control-plane

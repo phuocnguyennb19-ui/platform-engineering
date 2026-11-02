@@ -1,0 +1,223 @@
+# ============================================================
+# PLATFORM BASELINE — every managed namespace
+#
+# Two policies per namespace, applied by the platform, owned by nobody else:
+#   1. default-deny        Ingress AND Egress
+#   2. allow-egress-baseline   DNS · kube API · in-cluster
+#
+# ── Why egress deny + in-cluster allow, and not per-destination egress ──
+# The destination's INGRESS rules are what actually gate access, and every tier
+# has them (10-monitoring, 20-database, 30-application). Duplicating that as
+# per-destination egress doubles the rules and doubles what breaks when a port
+# moves, while adding no isolation the ingress side does not already provide.
+#
+# What egress deny DOES add here is the thing ingress rules cannot: no pod in
+# these namespaces can open a connection to the INTERNET. That closes
+# exfiltration and C2 without needing a full dependency graph per workload.
+#
+# Phase 2 — once flows are mapped, replace `allow-egress-baseline`'s in-cluster
+# rule with per-workload egress. Do that per namespace, not all at once.
+#
+# ⚠ CONSEQUENCE: a workload that legitimately calls out to the internet must be
+#   granted it explicitly. Two already are, in 10-monitoring.yaml:
+#     grafana       → plugin downloads (GF_INSTALL_PLUGINS)
+#     alertmanager  → webhook receivers (Slack, PagerDuty, ...)
+#   Anything else that starts failing DNS-resolvable-but-unreachable after this
+#   is almost certainly a missing external-egress rule, not a broken app.
+#
+# ⚠ `infra` is absent on purpose — API-server-called webhooks live there. See
+#   README.md. `kube-system` is absent because CoreDNS and metrics-server are
+#   reached BY the API server and by every pod; policy there breaks the cluster.
+# ============================================================
+
+# The namespace list below is explicit on purpose: a namespace gets a baseline
+# only once someone has checked its workloads survive losing internet egress.
+
+# ── observability ───────────────────────────────────────────
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: observability
+  labels: { managed-by: platform, policy: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-baseline
+  namespace: observability
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # DNS. Without this every hostname lookup fails and nothing else matters.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Kubernetes API. Grafana's sidecars watch ConfigMaps, the operator watches
+    # CRs, kube-state-metrics lists every object.
+    # 🔧 10.96.0.1 is the default ClusterIP of `kubernetes.default`. Verify:
+    #      kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+    - to:
+        - ipBlock: { cidr: 10.96.0.1/32 }
+      ports:
+        - { protocol: TCP, port: 443 }
+    # Everything else in-cluster. Gated at the destination by its ingress rules.
+    - to:
+        - namespaceSelector: {}
+    # ⚠ LOAD-BEARING FOR PROMETHEUS. `namespaceSelector: {}` matches POD IPs
+    #   only — it does NOT match node IPs. Prometheus scrapes kubelet (:10250)
+    #   and node-exporter (:9100) at the NODE address, because node-exporter is
+    #   hostNetwork. Without these RFC1918 blocks, egress-deny silently kills 4
+    #   of the stack's own targets while the rest keep working.
+    #   Private ranges only: public egress stays denied.
+    - to:
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 172.16.0.0/12 }
+        - ipBlock: { cidr: 192.168.0.0/16 }
+---
+# ── database ────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: database
+  labels: { managed-by: platform, policy: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-baseline
+  namespace: database
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - namespaceSelector: {}
+---
+# ── velero · trivy-system ───────────────────────────────────
+# ⚠ BOTH need internet egress and are granted it in 40-platform.yaml:
+#   velero → object storage / cloud API · trivy-operator → vuln DB + registries.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: velero
+  labels: { managed-by: platform, policy: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-baseline
+  namespace: velero
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock: { cidr: 10.96.0.1/32 }
+      ports:
+        - { protocol: TCP, port: 443 }
+    - to:
+        - namespaceSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: trivy-system
+  labels: { managed-by: platform, policy: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-baseline
+  namespace: trivy-system
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock: { cidr: 10.96.0.1/32 }
+      ports:
+        - { protocol: TCP, port: 443 }
+    - to:
+        - namespaceSelector: {}
+---
+# ── NetworkPolicies of namespace `prod` (this environment's app tier) ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: prod
+  labels: { managed-by: platform, policy: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-baseline
+  namespace: prod
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock: { cidr: 10.96.0.1/32 }
+      ports:
+        - { protocol: TCP, port: 443 }
+    - to:
+        - namespaceSelector: {}

@@ -1,0 +1,27 @@
+# Reference K3s server configuration — copy to /etc/rancher/k3s/config.yaml on the first
+# server BEFORE installing. Named *.txt so no tool in this repository reads it as YAML or
+# as a manifest. Every value is a choice to review, not a requirement.
+#
+# Never put `token:` here or anywhere in git: the join token is generated on the server
+# (/var/lib/rancher/k3s/server/node-token) and moved over a secure channel.
+
+# API certificate must cover the address clients use (VIP, load balancer or DNS name).
+tls-san:
+  - <api-address>
+
+# The repository's values expect the Kong IngressClass (kong); the bundled
+# Traefik would register a second, unused class. Keep ServiceLB unless another load
+# balancer (MetalLB, kube-vip) assigns LoadBalancer addresses.
+disable:
+  - traefik
+
+# Kubeconfig on the server stays root-only.
+write-kubeconfig-mode: "0600"
+
+# Pod Security Admission is enforced per namespace by labels
+# (environments/<env>/kubernetes/namespace/namespaces.yaml); no cluster-wide default is set here.
+
+# Defaults, listed so the choice is visible. Change only together with the CNI decision.
+# flannel-backend: vxlan
+# cluster-cidr: 10.42.0.0/16
+# service-cidr: 10.43.0.0/16

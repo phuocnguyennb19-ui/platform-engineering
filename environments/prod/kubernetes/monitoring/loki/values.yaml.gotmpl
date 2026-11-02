@@ -1,0 +1,72 @@
+# ============================================================
+# Loki — deployment topology (mode / replicas / persistence / gateway)
+# Server config (schema/limits/compactor/storage/ruler) lives in
+# loki/config.yaml.gotmpl. Env sizing via the $size table below.
+#
+# dev / staging → SingleBinary + filesystem PVC  (cheap, simple)
+# prod          → SimpleScalable + S3 object store (durable, HA)
+# ============================================================
+
+fullnameOverride: loki
+
+# nginx gateway — stable in-cluster entrypoint used by Grafana/Alloy.
+# nginx gateway — stable in-cluster entrypoint used by Grafana/Alloy.
+gateway:
+  enabled: true
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+  replicas: 2
+
+# Subcharts we don't run here (metrics via kube-prometheus-stack; caches
+# only needed at higher scale).
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+test:
+  enabled: false
+deploymentMode: SimpleScalable
+# Not used in SimpleScalable mode:
+singleBinary:
+  replicas: 0
+
+backend:
+  replicas: 2
+  persistence:
+    size: 50Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 1, memory: 2Gi }
+read:
+  replicas: 2
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 1, memory: 2Gi }
+write:
+  replicas: 2
+  persistence:
+    size: 50Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 1, memory: 2Gi }
+lokiCanary:
+  enabled: true
+chunksCache:
+  enabled: true
+  allocatedMemory: 2048
+resultsCache:
+  enabled: true
+
+# ── SimpleScalable mode (prod) ──────────────────────────────
+serviceAccount:
+  create: true
+  annotations: {}
+  # eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/loki-prod

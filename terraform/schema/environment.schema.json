@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "infra-base/terraform/environments/<env>/environment.yaml",
+  "title": "environments/<env>/terraform/environment.yaml",
   "type": "object",
   "additionalProperties": false,
   "required": ["environment", "account", "region", "name_prefix", "release"],

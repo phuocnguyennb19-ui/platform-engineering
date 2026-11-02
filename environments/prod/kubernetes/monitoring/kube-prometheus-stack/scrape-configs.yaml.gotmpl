@@ -1,0 +1,71 @@
+# ============================================================
+# kube-prometheus-stack — Prometheus additionalScrapeConfigs
+# Merged into the release on top of prometheus.yaml.gotmpl.
+#
+# ServiceMonitors/PodMonitors cover most in-cluster targets. Use this file
+# for raw scrape jobs that don't have a CRD: annotation-based pods, static
+# external targets, blackbox probes, cross-Prometheus federation.
+# ============================================================
+
+prometheus:
+  prometheusSpec:
+    additionalScrapeConfigs:
+      # ── Annotation-based pod discovery ──────────────────────
+      # Scrapes any pod carrying prometheus.io/scrape: "true"
+      # (honors prometheus.io/path and prometheus.io/port). Covers pods that
+      # expose metrics but ship no ServiceMonitor (e.g. Loki gateway).
+      - job_name: kubernetes-pods-annotated
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: "(.+)"
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: "([^:]+)(?::\\d+)?;(\\d+)"
+            replacement: "$1:$2"
+            target_label: __address__
+          - action: labelmap
+            regex: "__meta_kubernetes_pod_label_(.+)"
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: "(Failed|Succeeded)"
+
+      # ── Static external targets (uncomment + fill) ──────────
+      # - job_name: external-endpoints
+      #   metrics_path: /metrics
+      #   static_configs:
+      #     - targets: ["10.0.0.10:9100"]
+      #       labels: { env: dev, tier: external }
+
+      # ── Blackbox probes (needs blackbox-exporter deployed) ──
+      # - job_name: blackbox-http
+      #   metrics_path: /probe
+      #   params: { module: [http_2xx] }
+      #   static_configs:
+      #     - targets: ["https://example.com"]
+      #   relabel_configs:
+      #     - source_labels: [__address__]
+      #       target_label: __param_target
+      #     - source_labels: [__param_target]
+      #       target_label: instance
+      #     - target_label: __address__
+      #       replacement: blackbox-exporter.observability.svc:9115
+
+      # ── Federation (pull aggregates from another Prometheus) ─
+      # - job_name: federate
+      #   honor_labels: true
+      #   metrics_path: /federate
+      #   params:
+      #     match[]: ['{__name__=~"job:.*"}']
+      #   static_configs:
+      #     - targets: ["prometheus-edge.dev.svc:9090"]

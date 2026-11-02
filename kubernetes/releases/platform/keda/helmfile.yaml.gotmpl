@@ -1,0 +1,30 @@
+# ============================================================
+# keda — event-driven autoscaling (ScaledObject).
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev --kube-context <ctx> -f kubernetes/releases/platform/keda/helmfile.yaml.gotmpl sync   # from the repo root
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../repositories.yaml
+environments:
+  dev:     { values: [ ../../../../environments/dev/kubernetes/state.yaml ], secrets: [ ../../../../environments/dev/kubernetes/secrets.enc.yaml ] }
+  staging: { values: [ ../../../../environments/staging/kubernetes/state.yaml ], secrets: [ ../../../../environments/staging/kubernetes/secrets.enc.yaml ] }
+  prod:    { values: [ ../../../../environments/prod/kubernetes/state.yaml ], secrets: [ ../../../../environments/prod/kubernetes/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: keda
+    namespace: keda
+    createNamespace: true
+    chart: kedacore/keda
+    version: 2.17.0
+    missingFileHandler: Error
+    labels: { name: keda, layer: platform, tier: infra, component: autoscaling, env: "{{ $env }}" }
+    values:
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/tools/keda/values.yaml.gotmpl

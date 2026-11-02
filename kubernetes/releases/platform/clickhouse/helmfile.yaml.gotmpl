@@ -1,0 +1,29 @@
+# ============================================================
+# clickhouse — OLAP store for analytics workloads.
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev --kube-context <ctx> -f kubernetes/releases/platform/clickhouse/helmfile.yaml.gotmpl sync   # from the repo root
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../repositories.yaml
+environments:
+  dev:     { values: [ ../../../../environments/dev/kubernetes/state.yaml ], secrets: [ ../../../../environments/dev/kubernetes/secrets.enc.yaml ] }
+  staging: { values: [ ../../../../environments/staging/kubernetes/state.yaml ], secrets: [ ../../../../environments/staging/kubernetes/secrets.enc.yaml ] }
+  prod:    { values: [ ../../../../environments/prod/kubernetes/state.yaml ], secrets: [ ../../../../environments/prod/kubernetes/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: clickhouse
+    namespace: database
+    chart: bitnami/clickhouse
+    version: 9.4.4
+    missingFileHandler: Error
+    labels: { name: clickhouse, layer: platform, tier: infra, component: analytics, env: "{{ $env }}" }
+    values:
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/tools/clickhouse/values.yaml.gotmpl

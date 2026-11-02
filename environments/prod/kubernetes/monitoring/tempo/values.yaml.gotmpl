@@ -1,0 +1,68 @@
+# ============================================================
+# Tempo — distributed trace storage
+# Chart: grafana/tempo  (single-binary Tempo)
+#
+# Receives OTLP from the OpenTelemetry Collector, stores traces,
+# and serves them to Grafana (the "Tempo" datasource) at
+# http://tempo.<ns>.svc.<domain>:3100
+#
+# dev/staging → filesystem PVC. prod → S3 object store (durable).
+# For very high trace volume switch to the `tempo-distributed`
+# chart; the single-binary chart covers small/medium fine.
+# ============================================================
+
+fullnameOverride: tempo
+
+tempo:
+
+  # OTLP receivers (gRPC 4317 / HTTP 4318) — the OTel Collector
+  # forwards spans here.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  # Generate RED metrics + service-graph metrics from spans and push
+  # to Prometheus (via the metrics-generator remote_write).
+  metricsGenerator:
+    enabled: true
+    remoteWriteUrl: http://kube-prometheus-stack-prometheus.{{ .Values.namespace }}.svc.{{ .Values.clusterDomain }}:9090/api/v1/write
+  retention: 336h
+
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: 2, memory: 2Gi }
+
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: tempo-traces-prod
+        region: ap-southeast-1
+        endpoint: s3.ap-southeast-1.amazonaws.com
+        # Prefer IRSA/Workload Identity; inject static keys via SOPS secret only if unavoidable.
+
+# Prometheus must accept remote_write from the metrics-generator.
+# (kube-prometheus-stack sets enableRemoteWriteReceiver — see note in README.)
+
+# Prometheus must accept remote_write from the metrics-generator.
+# (kube-prometheus-stack sets enableRemoteWriteReceiver — see note in README.)
+persistence:
+  enabled: true
+  accessModes: ["ReadWriteOnce"]
+  {{- if (.Values.storageClass) }}
+  storageClass: {{ (.Values.storageClass) }}
+  {{- end }}
+  size: 30Gi
+
+# Scrape Tempo's own metrics via a ServiceMonitor.
+serviceMonitor:
+  enabled: true
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000

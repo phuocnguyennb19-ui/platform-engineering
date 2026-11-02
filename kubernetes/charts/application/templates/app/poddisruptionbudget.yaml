@@ -1,0 +1,19 @@
+{{- /* PodDisruptionBudget — selector is component-scoped so cronjob and worker
+       pods are never counted against the application's availability budget. */ -}}
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: {{ include "application.pdb.apiVersion" . }}
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+spec:
+  {{- include "application.pdb.budget" (dict "pdb" .Values.podDisruptionBudget "what" "podDisruptionBudget") | nindent 2 }}
+  {{- with .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "application.componentSelectorLabels" (dict "root" $ "component" "app") | nindent 6 }}
+{{- end }}

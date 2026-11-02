@@ -4,7 +4,7 @@ variable "application" {
 }
 
 variable "environment" {
-  description = "Directory name under infra-base/terraform/environments/ (ENVIRONMENT)."
+  description = "Terraform environment name (dev | staging | production). Its values are environments/<dir>/terraform/, found by the environment: field (production lives in prod/)."
   type        = string
 }
 

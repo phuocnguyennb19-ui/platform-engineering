@@ -1,0 +1,34 @@
+# ============================================================
+# karpenter — node autoscaler. NodePool/EC2NodeClass CRs live in manifests/ (kubectl apply after sync).
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev --kube-context <ctx> -f kubernetes/releases/platform/karpenter/helmfile.yaml.gotmpl sync   # from the repo root
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../repositories.yaml
+environments:
+  dev:     { values: [ ../../../../environments/dev/kubernetes/state.yaml ], secrets: [ ../../../../environments/dev/kubernetes/secrets.enc.yaml ] }
+  staging: { values: [ ../../../../environments/staging/kubernetes/state.yaml ], secrets: [ ../../../../environments/staging/kubernetes/secrets.enc.yaml ] }
+  prod:    { values: [ ../../../../environments/prod/kubernetes/state.yaml ], secrets: [ ../../../../environments/prod/kubernetes/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: karpenter
+    namespace: kube-system
+    chart: oci://public.ecr.aws/karpenter/karpenter
+    version: 1.14.0
+    # Only when nodeAutoscaler: karpenter (environments/<env>/kubernetes/state.yaml). Not before
+    # terraform/stacks/core provides its controller role, node role, interruption queue and
+    # discovery tags — none exist yet, and a controller without them never becomes ready,
+    # which fails the whole `helmfile sync`.
+    installed: {{ eq (.Values | get "nodeAutoscaler" "none") "karpenter" }}
+    missingFileHandler: Error
+    labels: { name: karpenter, layer: platform, tier: infra, component: autoscaling, env: "{{ $env }}" }
+    values:
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/tools/karpenter/values.yaml.gotmpl

@@ -1,0 +1,91 @@
+# ============================================================
+# Alloy — node log/metric collector (DaemonSet)
+# Chart: grafana/alloy
+#
+# Runs on every node, discovers pods, tails their logs and pushes
+# to Loki at http://loki-gateway.<ns>.svc.<domain>/loki/api/v1/push
+# Replaces Promtail (deprecated).
+#
+# App-emitted OTLP telemetry goes through the OTel Collector instead;
+# Alloy here is specifically the node-level LOG shipper.
+# ============================================================
+
+fullnameOverride: alloy
+
+controller:
+  type: daemonset
+  # Tolerate every node (incl. tainted/control-plane) so logs are collected cluster-wide.
+  tolerations:
+    - operator: Exists
+
+alloy:
+  # Alloy needs to read /var/log/pods — mount the host log dir.
+  mounts:
+    varlog: true
+
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+  # River/Alloy pipeline: discover pods → relabel to useful Loki labels
+  # → tail logs → write to Loki.
+  configMap:
+    content: |-
+      // ── Discover all pods on this node ──────────────────────
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      // ── Map pod metadata → Loki labels ──────────────────────
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_node_name"]
+          target_label  = "node"
+        }
+      }
+
+      // ── Tail container logs ─────────────────────────────────
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.default.receiver]
+      }
+
+      // ── Light processing: attach cluster/env, drop noisy health checks ──
+      loki.process "default" {
+        forward_to = [loki.write.default.receiver]
+
+        stage.static_labels {
+          values = {
+            env = "staging",
+          }
+        }
+      }
+
+      // ── Ship to Loki ────────────────────────────────────────
+      loki.write "default" {
+        endpoint {
+          url = "http://loki-gateway.{{ (.Values.namespace) }}.svc.{{ (.Values.clusterDomain) }}/loki/api/v1/push"
+        }
+      }
+
+# Expose Alloy's own metrics to Prometheus.
+serviceMonitor:
+  enabled: true

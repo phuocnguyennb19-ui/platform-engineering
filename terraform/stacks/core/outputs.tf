@@ -56,7 +56,7 @@ output "eks_cluster_certificate_authority_data" {
 }
 
 output "addon_role_arns" {
-  description = "IRSA role per eks.addon_roles key, for the k8s/platform add-on ServiceAccounts."
+  description = "IRSA role per eks.addon_roles key, for the kubernetes/platform add-on ServiceAccounts."
   value       = local.eks_enabled ? module.eks[0].irsa_role_arns : {}
 }
 

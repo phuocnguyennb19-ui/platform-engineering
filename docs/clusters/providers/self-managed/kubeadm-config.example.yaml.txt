@@ -1,0 +1,22 @@
+# Reference kubeadm configuration for the FIRST control-plane node:
+#   sudo kubeadm init --config kubeadm-config.yaml --upload-certs        [CHANGES STATE]
+# Named *.txt so no tool in this repository mistakes it for a Kubernetes manifest.
+# Every <placeholder> must be replaced; every value is a choice to review.
+# No token, certificate key or credential belongs in this file or in git.
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: <v1.32.x>
+# A stable address (VIP / load balancer / DNS name), never a single node's IP:
+# it is written into every certificate and kubeconfig and is hard to change later.
+controlPlaneEndpoint: "<api-address>:6443"
+apiServer:
+  certSANs:
+    - <api-address>
+networking:
+  # Must match the CNI you install right after `kubeadm init`.
+  podSubnet: <pod-cidr>
+  serviceSubnet: 10.96.0.0/12
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd

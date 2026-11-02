@@ -1,9 +1,0 @@
-# dev: only the values that differ per environment — layered after ../values.yaml.gotmpl
-
-controller:
-  ingressClassResource:
-    name: nginx-dev
-    controllerValue: "k8s.io/ingress-nginx-dev"
-  ingressClass: nginx-dev
-
-  replicaCount: 1

@@ -1,0 +1,31 @@
+# Helmfile state values of the `staging` environment — read by every platform helmfile
+# (environments.staging.values) and by kubernetes/helmfile.yaml.gotmpl.
+# platformName / eksClusterName mirror terraform/stacks/core, which creates the cluster and
+# the add-on IAM roles (<eksClusterName>-irsa-<addon>); renaming either breaks Helm.
+env: staging
+platformName: platform-staging          # terraform <name_prefix>-<environment>
+eksClusterName: platform-staging-eks    # terraform core output eks_cluster_name
+namespace: observability
+profile: staging
+clusterDomain: cluster.local
+storageClass: ""
+# IngressClass every platform Ingress and app uses — Kong (KIC, release kubernetes/releases/platform/kong,
+# ns infra). Read by cert-manager's HTTP-01 solvers, grafana, harbor, minio, opensearch-dashboards.
+ingressClass: kong
+ingressDomain: staging.example.com
+# Node autoscaler of this cluster — at most one: none | cluster-autoscaler | karpenter.
+# Default `none`: no node autoscaler is installed; node groups keep their fixed size.
+# Enable it per env only when that env needs it:
+#   cluster-autoscaler — uses what terraform/stacks/core already creates (IRSA role
+#     <eksClusterName>-irsa-cluster-autoscaler, managed node groups auto-tagged for discovery).
+#   karpenter — needs core to add its controller role, node role, interruption queue and
+#     discovery tags FIRST.
+# A change takes effect on the next platform sync: the selected one is installed, the other
+# (or, with `none`, any installed one) is UNINSTALLED.
+nodeAutoscaler: none
+# ingress-nginx controller (kubernetes/releases/platform/ingress-nginx, IngressClass nginx-staging).
+# Kong is the only ingress controller now; ingress-nginx stays installed only until the cutover
+# is verified. Setting this to false UNINSTALLS it on the next platform sync — its NLB is
+# deleted and external-dns drops the records that still point at it. Cutover order:
+# kubernetes/releases/platform/kong/README.md §8. Do not flip before steps 1–3 there are done.
+ingressNginx: true

@@ -1,7 +1,7 @@
 module "config" {
   source = "../../shared/config"
 
-  config_root       = "${path.root}/../../../infra-base/terraform"
+  config_root       = "${path.root}/../../../environments"
   applications_root = "${path.root}/../../../applications"
   environment       = var.environment
 }
@@ -22,9 +22,9 @@ locals {
   app_repositories    = [for a in module.config.applications : a.repository]
 
   mirror_errors = concat(
-    [for r in local.mirror_repositories : "infra-base/terraform/environments/${var.environment}/core.yaml: ecr.mirror_repositories entry ${r} is also an application image.repository" if contains(local.app_repositories, r)],
-    [for r in local.mirror_repositories : "infra-base/terraform/environments/${var.environment}/core.yaml: ecr.mirror_repositories entry ${r} is not a valid repository name" if !can(regex("^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$", r))],
-    length(distinct(local.mirror_repositories)) == length(local.mirror_repositories) ? [] : ["infra-base/terraform/environments/${var.environment}/core.yaml: ecr.mirror_repositories has duplicates"],
+    [for r in local.mirror_repositories : "${module.config.env_path}/core.yaml: ecr.mirror_repositories entry ${r} is also an application image.repository" if contains(local.app_repositories, r)],
+    [for r in local.mirror_repositories : "${module.config.env_path}/core.yaml: ecr.mirror_repositories entry ${r} is not a valid repository name" if !can(regex("^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$", r))],
+    length(distinct(local.mirror_repositories)) == length(local.mirror_repositories) ? [] : ["${module.config.env_path}/core.yaml: ecr.mirror_repositories has duplicates"],
   )
 }
 

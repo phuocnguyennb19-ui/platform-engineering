@@ -1,0 +1,33 @@
+# Cluster METADATA — what this cluster is and what it must offer. It provisions nothing.
+# A K3s cluster used as a dev target.
+#
+# A target for the `dev` environment: select it in target.local.yaml (cluster: k3s-dev),
+# then `helmfile -e dev -l name=<app> sync` from the repository root.
+schema: kubernetes-environment/v1alpha1
+name: k3s-dev
+provider: k3s
+environment: dev
+context: <k3s-dev-context>
+
+provisioning:
+  method: k3s-installer       # nothing in this repo installs it; see source
+  source: docs/clusters/providers/k3s/README.md
+
+delivery:
+  owner: helmfile             # manual, guarded by scripts/deploy/release-guard.sh
+  ciDeployAllowed: false
+
+# Field meanings and preflight semantics: schemas/cluster.schema.json, README.md §4.
+capabilities:
+  ingress:
+    expected: required  # dev values: ingress.enabled, className kong (state.yaml ingressClass)
+    verified: unknown
+  gatewayAPI:
+    expected: not-used  # no app values render Gateway API objects
+    verified: unknown
+  prometheusOperator:
+    expected: optional  # apps opt in with prometheusRule.enabled (off in shared app-values)
+    verified: unknown
+  persistentStorage:
+    expected: optional  # the application chart has no persistence by default
+    verified: unknown

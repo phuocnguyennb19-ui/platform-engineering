@@ -1,0 +1,32 @@
+# TEST FIXTURE for tests/preflight-test.sh — eks-dev with prometheusOperator required, so the
+# "CRD present, operator missing" case is exercised. Not a real cluster; not read by any tool.
+schema: kubernetes-environment/v1alpha1
+name: required-operator
+provider: eks
+environment: dev
+context: <eks-dev-context-alias>   # a local alias, never the cluster ARN (it embeds the account ID)
+
+provisioning:
+  method: terraform           # plan:core → apply:core (manual) in ci/terraform/platform.yml
+  source: terraform/stacks/core
+
+delivery:
+  # apps: manual helmfile (APP_TIER_OWNER=helmfile, scripts/deploy/release-guard.sh) until Argo CD
+  # takes over; platform tools: helmfile releases synced by CI (ci/k8s/helmfile.yml)
+  owner: helmfile
+  ciDeployAllowed: false
+
+# Field meanings and preflight semantics: schemas/cluster.schema.json, README.md §4.
+capabilities:
+  ingress:
+    expected: required  # dev/app-values.yaml.gotmpl: ingress.enabled, className nginx-dev
+    verified: unknown
+  gatewayAPI:
+    expected: optional  # kubernetes/releases/platform/gateway-api (Kong); no app values use it
+    verified: unknown
+  prometheusOperator:
+    expected: required  # fixture: an environment whose apps enable prometheusRule
+    verified: unknown
+  persistentStorage:
+    expected: optional  # the eks module default add-ons include aws-ebs-csi-driver
+    verified: unknown

@@ -1,0 +1,74 @@
+{{- include "application.validate" . -}}
+{{- if (.Values.proxy).enabled }}{{- include "application.proxy.validate" . -}}{{- end -}}
+{{- /* `probes` and `initContainers` are excluded from component inheritance (see
+       componentConfig): workers and cronjobs have no `http` port to probe and must not
+       re-run the app's migrations. For the app workload the root values ARE its own,
+       so they are passed in explicitly. */ -}}
+{{- $c := include "application.componentConfig" (dict "root" $ "overrides" (dict "probes" (.Values.probes | default dict) "initContainers" (.Values.initContainers | default list))) | fromYaml -}}
+{{- $kind := .Values.workload.kind -}}
+apiVersion: apps/v1
+kind: {{ $kind }}
+metadata:
+  name: {{ include "application.fullname" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+  {{- $ann := include "application.annotations" . | trim }}
+  {{- if $ann }}
+  annotations:
+    {{- $ann | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if eq $kind "Deployment" }}
+  {{- if not (or .Values.autoscaling.enabled .Values.keda.enabled) }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.workload.revisionHistoryLimit }}
+  progressDeadlineSeconds: {{ .Values.workload.progressDeadlineSeconds }}
+  minReadySeconds: {{ .Values.workload.minReadySeconds }}
+  strategy:
+    type: {{ .Values.workload.strategy.type }}
+    {{- if eq .Values.workload.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      {{- toYaml .Values.workload.strategy.rollingUpdate | nindent 6 }}
+    {{- end }}
+  {{- else if eq $kind "StatefulSet" }}
+  {{- if not (or .Values.autoscaling.enabled .Values.keda.enabled) }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.workload.revisionHistoryLimit }}
+  minReadySeconds: {{ .Values.workload.minReadySeconds }}
+  serviceName: {{ .Values.workload.statefulset.serviceName | default (printf "%s-headless" (include "application.fullname" .)) }}
+  podManagementPolicy: {{ .Values.workload.statefulset.podManagementPolicy }}
+  updateStrategy:
+    type: {{ .Values.workload.statefulset.updateStrategy.type }}
+    {{- if and (eq .Values.workload.statefulset.updateStrategy.type "RollingUpdate") .Values.workload.statefulset.updateStrategy.rollingUpdate }}
+    rollingUpdate:
+      {{- toYaml .Values.workload.statefulset.updateStrategy.rollingUpdate | nindent 6 }}
+    {{- end }}
+  {{- with .Values.workload.statefulset.persistentVolumeClaimRetentionPolicy }}
+  persistentVolumeClaimRetentionPolicy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- else if eq $kind "DaemonSet" }}
+  revisionHistoryLimit: {{ .Values.workload.revisionHistoryLimit }}
+  minReadySeconds: {{ .Values.workload.minReadySeconds }}
+  updateStrategy:
+    type: {{ .Values.workload.daemonset.updateStrategy.type }}
+    {{- if and (eq .Values.workload.daemonset.updateStrategy.type "RollingUpdate") .Values.workload.daemonset.updateStrategy.rollingUpdate }}
+    rollingUpdate:
+      {{- toYaml .Values.workload.daemonset.updateStrategy.rollingUpdate | nindent 6 }}
+    {{- end }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "application.componentSelectorLabels" (dict "root" $ "component" "app") | nindent 6 }}
+  template:
+    metadata:
+      {{- include "application.podTemplateMetadata" (dict "root" $ "c" $c "component" "app") | trim | nindent 6 }}
+    spec:
+      {{- include "application.podSpec" (dict "root" $ "c" $c "component" "app" "name" .Chart.Name "httpPort" .Values.service.enabled "proxy" true) | trim | nindent 6 }}
+  {{- if and (eq $kind "StatefulSet") .Values.workload.statefulset.volumeClaimTemplates }}
+  volumeClaimTemplates:
+    {{- toYaml .Values.workload.statefulset.volumeClaimTemplates | nindent 4 }}
+  {{- end }}

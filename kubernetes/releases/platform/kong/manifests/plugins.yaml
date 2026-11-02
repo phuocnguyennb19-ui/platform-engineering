@@ -1,0 +1,113 @@
+# ============================================================
+# Kong — declarative cluster-wide plugins (KongClusterPlugin CRs)
+# Part of the kong release: ../extra-objects.yaml.gotmpl renders every document of this file
+# into the chart's extraObjects, so a sync of the kong release installs them with Kong.
+# Do NOT kubectl-apply this file any more (Helm would refuse to adopt the objects).
+# Env-agnostic. Attach to routes/services via the label `global: "true"`
+# (cluster-wide) or by referencing the plugin name from an Ingress/HTTPRoute:
+#   metadata.annotations: { konghq.com/plugins: "request-size-limit" }   (comma-separated)
+# A plugin attached to a route/service OVERRIDES a global plugin of the same type
+# for that route (Kong precedence: route > service > global) — it does not stack.
+#
+# Replaces the cluster-wide behaviour ingress-nginx had (controller.addHeaders,
+# config.proxy-body-size 8m, hsts) — see kong/README.md §8.
+# ============================================================
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: prometheus
+  namespace: infra
+  labels:
+    global: "true"                      # apply to ALL routes → /metrics for Prometheus
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  status_code_metrics: true
+  latency_metrics: true
+  bandwidth_metrics: true
+  per_consumer: false
+plugin: prometheus
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: correlation-id
+  namespace: infra
+  labels:
+    global: "true"                      # inject a trace-friendly request id everywhere
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  header_name: X-Request-ID
+  generator: uuid#counter
+  echo_downstream: true
+plugin: correlation-id
+---
+# Not global — reference from specific routes needing protection.
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: rate-limit-default
+  namespace: infra
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  minute: 300
+  policy: local                         # use `redis` + release/redis for multi-replica accuracy
+  limit_by: consumer
+  fault_tolerant: true
+plugin: rate-limiting
+---
+# Opt-in, NOT global: replaces ingress-nginx `proxy-body-size: 8m` (its controller-wide
+# default). Attached per Ingress with `konghq.com/plugins: request-size-limit` — the app
+# default in environments/<env>/kubernetes/app-values.yaml.gotmpl and every platform UI
+# Ingress (argocd, grafana, minio console, opensearch-dashboards).
+# Not global on purpose: harbor (image layers, ingress-nginx proxy-body-size "0") must
+# stream unbuffered. Without Content-Length this plugin reads the WHOLE body before
+# proxying, into Kong's prefix emptyDir (chart default sizeLimit 256Mi) — a large layer
+# push would get the proxy pod evicted. Kong itself has no body limit
+# (nginx_http_client_max_body_size = 0), so an Ingress without this annotation is unlimited.
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: request-size-limit
+  namespace: infra
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  allowed_payload_size: 8               # MB (size_unit default: megabytes) — same as ingress-nginx
+plugin: request-size-limiting
+---
+# Global security response headers — replaces ingress-nginx controller.addHeaders and
+# config.hsts* (set in every env). `replace` + `add` together = always set, overwriting
+# an upstream value, which is what ingress-nginx did (more_set_headers).
+# ⚠ A route-level response-transformer (an app's own KongPlugin) REPLACES this global one
+#   for that route; such an app must repeat these headers in its own plugin.
+# HSTS on a plain-HTTP response is ignored by browsers, so dev (HTTP) is unaffected.
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: security-headers
+  namespace: infra
+  labels:
+    global: "true"
+  annotations:
+    kubernetes.io/ingress.class: kong
+config:
+  replace:
+    headers:
+      - "X-Frame-Options:DENY"
+      - "X-Content-Type-Options:nosniff"
+      - "X-XSS-Protection:1; mode=block"
+      - "Referrer-Policy:strict-origin-when-cross-origin"
+      - "Content-Security-Policy:default-src 'self'"
+      - "Strict-Transport-Security:max-age=63072000; includeSubDomains"
+  add:                                  # same list as replace — keep in sync
+    headers:
+      - "X-Frame-Options:DENY"
+      - "X-Content-Type-Options:nosniff"
+      - "X-XSS-Protection:1; mode=block"
+      - "Referrer-Policy:strict-origin-when-cross-origin"
+      - "Content-Security-Policy:default-src 'self'"
+      - "Strict-Transport-Security:max-age=63072000; includeSubDomains"
+plugin: response-transformer

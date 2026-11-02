@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "environments/<env>/kubernetes/cluster/environment.yaml",
+  "description": "Environment metadata (kubernetes-environment-defaults/v1alpha1): the environment's name in each tool, the deploy policy and the expected Pod Security level. Namespace, replicas and PSA enforcement are owned elsewhere (environments/README.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "name",
+    "names",
+    "delivery",
+    "security"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kubernetes-environment-defaults/v1alpha1"
+    },
+    "name": {
+      "enum": [
+        "dev",
+        "staging",
+        "production"
+      ]
+    },
+    "names": {
+      "description": "The environment's name in each tool. The app namespace equals names.helmfile.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "helmfile",
+        "terraform"
+      ],
+      "properties": {
+        "helmfile": {
+          "enum": [
+            "dev",
+            "staging",
+            "prod"
+          ]
+        },
+        "terraform": {
+          "enum": [
+            "dev",
+            "staging",
+            "production"
+          ]
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "autoDeploy"
+      ],
+      "properties": {
+        "autoDeploy": {
+          "description": "Policy: may a pipeline deploy this environment unattended. check-metadata.sh rejects true for staging/production; no pipeline reads it.",
+          "type": "boolean"
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "podSecurityStandard"
+      ],
+      "properties": {
+        "podSecurityStandard": {
+          "enum": [
+            "privileged",
+            "baseline",
+            "restricted"
+          ],
+          "description": "Expected pod-security.kubernetes.io/enforce label of the app namespace. Must equal the namespace manifest (check-metadata.sh); preflight compares it with the live label."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "name": {
+            "enum": [
+              "dev"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "names": {
+            "properties": {
+              "helmfile": {
+                "const": "dev"
+              },
+              "terraform": {
+                "const": "dev"
+              }
+            },
+            "required": [
+              "terraform"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "name": {
+            "enum": [
+              "staging"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "names": {
+            "properties": {
+              "helmfile": {
+                "const": "staging"
+              },
+              "terraform": {
+                "const": "staging"
+              }
+            },
+            "required": [
+              "terraform"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "name": {
+            "enum": [
+              "production"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "names": {
+            "properties": {
+              "helmfile": {
+                "const": "prod"
+              },
+              "terraform": {
+                "const": "production"
+              }
+            },
+            "required": [
+              "terraform"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "name": {
+            "enum": [
+              "staging",
+              "production"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "delivery": {
+            "properties": {
+              "autoDeploy": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

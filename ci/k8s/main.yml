@@ -3,12 +3,13 @@
 #
 # TWO independent pipelines:
 #
-#   CHART pipeline  — k8s/charts/** changes on main branch
+#   CHART pipeline  — kubernetes/charts/** changes on main branch
 #     lint → package → publish to ECR
 #
 #   DEPLOY pipeline — triggered by source repos via pipeline trigger
 #     setup AWS → login ECR → get EKS kubeconfig
-#     → helmfile sync --selector name=<service>
+#     → helmfile sync --selector layer=app,name=<service>
+#     (fails while kubernetes/ holds no layer=app release — the app tier is Argo CD's)
 #
 # Variables injected by source repos via pipeline trigger:
 #   SERVICE_NAME       e.g. be-payment
@@ -27,10 +28,27 @@
 # ============================================================
 
 # Included by the root .gitlab-ci.yml (stages, variables, default live there).
-# Every job runs from k8s/; PIPELINE_PART=terraform pipelines skip them.
+# Every job runs from kubernetes/; PIPELINE_PART=terraform pipelines skip them.
 .k8s-guard:
   rules:
     - if: $PIPELINE_PART == "terraform" || $CI_PIPELINE_SOURCE == "pipeline"
+      when: never
+
+# Platform, Argo CD and chart jobs (helmfile:*, argocd:*, chart:*) run only in
+# push and merge-request pipelines. A trigger token or a web/api/schedule run
+# must never reach them: `changes:` evaluates to true for those sources, so it
+# is not a guard. Use after .k8s-guard.
+.k8s-push-mr-only:
+  rules:
+    - if: $CI_PIPELINE_SOURCE !~ /^(push|merge_request_event)$/
+      when: never
+
+# deploy:setup / deploy:apply / deploy:rollback assume gitlab-deploy-<env>:
+# only a protected ref (the deploy-template triggers ref=main) may run them.
+# All three carry it, so deploy:rollback's `needs: deploy:apply` always resolves.
+.k8s-protected-ref:
+  rules:
+    - if: $CI_COMMIT_REF_PROTECTED != "true"
       when: never
 
 # ─── Environment + AWS helpers ──────────────────────────────
@@ -57,10 +75,10 @@
   echo "Assumed role: $AWS_ROLE_ARN"
 
 .ecr-login: &ecr-login |
-  # App image registry (deploy account)
-  aws ecr get-login-password --region $AWS_REGION \
-    | docker login --username AWS --password-stdin \
-      ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+  # Deploy jobs need no Docker daemon: helm/helmfile/kubectl never pull app
+  # images (the cluster does), and deploy-tools ships no docker CLI. Only the
+  # chart registry is logged in, so these jobs can run on a runner without the
+  # host Docker socket (ci/README.md, "Runners").
   # Helm chart registry (shared infra account)
   aws ecr get-login-password --region $AWS_REGION \
     | helm registry login --username AWS --password-stdin \
@@ -79,11 +97,11 @@
   [ -n "$SOPS_AGE_KEY" ] || [ "$DEPLOY_ENV" = prod ] || { echo "[ERROR] SOPS age key for ${DEPLOY_ENV} is not set"; exit 1; }
   unset SOPS_AGE_KEY
 
-# App registries in infra-base/k8s/env-values/<env>/app-values.yaml.gotmpl are plain YAML (Argo CD reads them),
+# App registries in environments/<env>/kubernetes/app-values.yaml.gotmpl are plain YAML (Argo CD reads them),
 # so the account ID is written there; nothing deploys while a marker is left.
 .config-complete: &config-complete |
-  if grep -n 'REPLACE_WITH_' "../infra-base/k8s/env-values/${DEPLOY_ENV}/app-values.yaml.gotmpl"; then
-    echo "[ERROR] ../infra-base/k8s/env-values/${DEPLOY_ENV}/app-values.yaml.gotmpl still has a REPLACE_WITH_ marker (ECR account ID)"; exit 1
+  if grep -n 'REPLACE_WITH_' "../environments/${DEPLOY_ENV}/kubernetes/app-values.yaml.gotmpl"; then
+    echo "[ERROR] ../environments/${DEPLOY_ENV}/kubernetes/app-values.yaml.gotmpl still has a REPLACE_WITH_ marker (ECR account ID)"; exit 1
   fi
 
 # Copies every Bitnami image the platform releases reference from
@@ -109,9 +127,24 @@
     echo "[OK] copied bitnamilegacy/${name}:${tag} → ${ref}"
   done
   unset RENDERED
+  # The chart's nginx proxy sidecar (proxy.image, pinned by digest) is pulled from this
+  # environment's ECR (global.imageRegistry). Copy it by digest from Docker Hub, tagged
+  # sha256-<digest>: ECR expires untagged images, and the tag cannot drift from the digest.
+  APPS_RENDERED="$(helmfile -f ../applications/helmfile.yaml.gotmpl -e "$DEPLOY_ENV" template --skip-deps --allow-no-matching-release)"
+  for ref in $(printf '%s\n' "$APPS_RENDERED" | grep -oE "${REGISTRY}/nginxinc/nginx-unprivileged@sha256:[a-f0-9]{64}" | sort -u); do
+    digest="${ref##*@}"; dst="${REGISTRY}/nginxinc/nginx-unprivileged:sha256-${digest#sha256:}"
+    if /tmp/crane digest "$ref" >/dev/null 2>&1; then echo "[OK] mirrored: nginxinc/nginx-unprivileged@${digest}"; continue; fi
+    /tmp/crane copy "docker.io/nginxinc/nginx-unprivileged@${digest}" "$dst"
+    [ "$(/tmp/crane digest "$dst")" = "$digest" ] || { echo "[ERROR] mirrored digest differs from ${digest}"; exit 1; }
+    echo "[OK] copied nginxinc/nginx-unprivileged@${digest} → ${dst}"
+  done
+  unset APPS_RENDERED
 
 .deploy-inputs: &deploy-inputs |
   echo "${SERVICE_NAME:-}" | grep -qE '^[a-z0-9][a-z0-9-]{0,52}$' || { echo "[ERROR] SERVICE_NAME is not a valid release name"; exit 1; }
+  # Only an application may be deployed or rolled back here, never a platform
+  # release (kyverno, vault, …): the name must be an applications/<app>/k8s folder.
+  [ -d "${CI_PROJECT_DIR}/applications/${SERVICE_NAME}/k8s" ] || { echo "[ERROR] SERVICE_NAME '${SERVICE_NAME}' is not an application: applications/${SERVICE_NAME}/k8s does not exist"; exit 1; }
   [ -z "${IMAGE_TAG:-}" ] || echo "$IMAGE_TAG" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$' || { echo "[ERROR] IMAGE_TAG is not a valid tag"; exit 1; }
   [ "${IMAGE_TAG:-}" != latest ] || { echo "[ERROR] IMAGE_TAG must not be latest"; exit 1; }
 
@@ -125,10 +158,16 @@
 
 # ============================================================
 # IMAGES PIPELINE — build utility Docker images
-# Trigger: ci/images/** changes on main, or a web trigger with BUILD_IMAGES=true
+# Trigger: ci/images/** changes pushed to the protected default branch, or a
+# web run with BUILD_IMAGES=true on that branch. Never a trigger, MR or other ref.
 #
 # Uses a Docker socket mount from the runner — no DinD/privileged needed.
 # The runner host must mount /var/run/docker.sock into the job container.
+#
+# These images run every deploy job (with the deploy roles and SOPS keys), so:
+#   - a release tag (<name>:<*_VERSION>) is pushed once and never overwritten;
+#   - the pushed digest is kept as an artifact (image-digests/<name>.txt) so
+#     consumers can pin <image>@sha256:… — see ci/README.md, "Tool images".
 # ============================================================
 
 .docker-build: &docker-build
@@ -137,6 +176,36 @@
     # --password-stdin, not -p: a password passed as an argv element is visible
     # in the process list of every other process on the runner host.
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  artifacts:
+    paths:
+      - image-digests/
+    expire_in: 1 year
+
+# Publishing is limited to the protected default branch. Use after .k8s-guard.
+.image-publish-guard:
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH || $CI_COMMIT_REF_PROTECTED != "true"
+      when: never
+
+# Pushes ${IMAGE}:${VERSION} only if that tag does not exist yet, then records
+# the digest. Set IMAGE and VERSION (and build the image) in an earlier script line.
+.push-immutable: &push-immutable |
+  if out="$(docker manifest inspect "${IMAGE}:${VERSION}" 2>&1)"; then
+    echo "[ERROR] ${IMAGE}:${VERSION} already exists. Release tags are never overwritten — bump the version variable."
+    exit 1
+  fi
+  case "$out" in
+    *"no such manifest"*|*"manifest unknown"*) ;;
+    *) echo "[ERROR] cannot tell whether ${IMAGE}:${VERSION} exists, refusing to push: ${out}"; exit 1 ;;
+  esac
+  # No `:latest` tag is published: it would make every consumer's build
+  # non-reproducible and violates the kyverno disallow-latest-tag policy.
+  docker push "${IMAGE}:${VERSION}"
+  DIGEST_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${VERSION}" | grep "^${IMAGE}@sha256:" | sed -n 1p)"
+  [ -n "$DIGEST_REF" ] || { echo "[ERROR] no ${IMAGE}@sha256 digest recorded for the pushed tag"; exit 1; }
+  mkdir -p image-digests
+  printf '%s\n' "$DIGEST_REF" > "image-digests/${IMAGE##*/}.txt"
+  echo "Pushed: ${IMAGE}:${VERSION} = ${DIGEST_REF}"
 
 # Image 1: deploy-tools (kubectl + helm + helmfile + aws-cli + sops)
 image:deploy-tools:
@@ -152,17 +221,14 @@ image:deploy-tools:
         -f ci/images/Dockerfile \
         -t "${IMAGE}:${VERSION}" \
         ci/images/
-
-      # No `:latest` tag is published: it would make every consumer's build
-      # non-reproducible and violates the kyverno disallow-latest-tag policy.
-      docker push "${IMAGE}:${VERSION}"
-      echo "Pushed: ${IMAGE}:${VERSION}"
+    - *push-immutable
   rules:
     - !reference [.k8s-guard, rules]
-    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - !reference [.image-publish-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "push"
       changes:
         - ci/images/Dockerfile
-    - if: $BUILD_IMAGES == "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $BUILD_IMAGES == "true"
 
 # Image 2: ci (Go + golangci-lint + gitleaks + hadolint)
 image:ci:
@@ -178,17 +244,14 @@ image:ci:
         -f ci/images/Dockerfile.ci \
         -t "${IMAGE}:${VERSION}" \
         ci/images/
-
-      # No `:latest` tag is published: it would make every consumer's build
-      # non-reproducible and violates the kyverno disallow-latest-tag policy.
-      docker push "${IMAGE}:${VERSION}"
-      echo "Pushed: ${IMAGE}:${VERSION}"
+    - *push-immutable
   rules:
     - !reference [.k8s-guard, rules]
-    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - !reference [.image-publish-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "push"
       changes:
         - ci/images/Dockerfile.ci
-    - if: $BUILD_IMAGES == "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $BUILD_IMAGES == "true"
 
 # Image 3: runner (gitlab-runner + docker-cli)
 image:runner:
@@ -204,17 +267,14 @@ image:runner:
         -f ci/images/Dockerfile.runner \
         -t "${IMAGE}:${VERSION}" \
         ci/images/
-
-      # No `:latest` tag is published: it would make every consumer's build
-      # non-reproducible and violates the kyverno disallow-latest-tag policy.
-      docker push "${IMAGE}:${VERSION}"
-      echo "Pushed: ${IMAGE}:${VERSION}"
+    - *push-immutable
   rules:
     - !reference [.k8s-guard, rules]
-    - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - !reference [.image-publish-guard, rules]
+    - if: $CI_PIPELINE_SOURCE == "push"
       changes:
         - ci/images/Dockerfile.runner
-    - if: $BUILD_IMAGES == "true"
+    - if: $CI_PIPELINE_SOURCE == "web" && $BUILD_IMAGES == "true"
 
 # ============================================================
 # CHART PIPELINE — triggered when charts/** changes
@@ -222,21 +282,19 @@ image:runner:
 
 .chart-changes: &chart-changes
   changes:
-    - k8s/charts/**/*
-    # App-tier inputs. The tree is flat, so the app folders are named
-    # explicitly — there is no `workloads/**` prefix to glob any more.
-    - infra-base/k8s/env-values/app-values.yaml.gotmpl
-    - infra-base/k8s/env-values/*/app-values.yaml.gotmpl
+    - kubernetes/charts/**/*
+    # App-tier inputs: the env layer, every app's values and the helmfile that maps them.
+    - environments/*/kubernetes/app-values.yaml.gotmpl
     - applications/*/k8s/**/*
-    - k8s/apps/be-payment/**/*
-    - k8s/apps/be-user/**/*
+    - applications/helmfile.yaml.gotmpl
 
 chart:lint:
   stage: lint
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE != "trigger"
       <<: *chart-changes
   script:
@@ -261,19 +319,16 @@ chart:lint:
   stage: lint
   script:
     - |
-      set -eu
-      fail=0
-      for svc in be-user be-payment; do
-        [ -f "apps/${svc}/helmfile.yaml.gotmpl" ] || continue
-        echo "── render ${svc} @ ${DEPLOY_ENV}"
-        if ! CHART_PATH="$(pwd)/charts/application" \
-             helmfile -f helmfile.yaml.gotmpl -e "${DEPLOY_ENV}" \
-                      template -l "name=${svc}" >/dev/null; then
-          echo "[FAIL] ${svc} @ ${DEPLOY_ENV}"
-          fail=1
-        fi
-      done
-      [ "$fail" -eq 0 ] || { echo "chart render failed for at least one service"; exit 1; }
+      set -euo pipefail
+      # Every app of this environment (applications/<app>/k8s/<env>/values.yaml), rendered
+      # through the same helmfile a deploy uses. template never runs the release guard.
+      echo "── render apps @ ${DEPLOY_ENV}"
+      helmfile -f ../applications/helmfile.yaml.gotmpl -e "${DEPLOY_ENV}" \
+               template --skip-deps --allow-no-matching-release \
+        | kubeconform -strict -summary \
+                      -ignore-missing-schemas \
+                      -schema-location default \
+                      -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
     - |
       set -eu
       CHART_PATH="$(pwd)/charts/application" \
@@ -287,11 +342,12 @@ chart:render:dev:
   extends: .chart-render
   variables: { DEPLOY_ENV: dev }
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - *env-select
     - *sops-setup
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE != "trigger"
       <<: *chart-changes
 
@@ -299,11 +355,12 @@ chart:render:staging:
   extends: .chart-render
   variables: { DEPLOY_ENV: staging }
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - *env-select
     - *sops-setup
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_REF_PROTECTED == "true"
       <<: *chart-changes
 
@@ -311,12 +368,13 @@ chart:render:prod:
   extends: .chart-render
   variables: { DEPLOY_ENV: prod }
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - *env-select
     - *aws-auth
     - *sops-setup
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_REF_PROTECTED == "true"
       <<: *chart-changes
 
@@ -326,7 +384,7 @@ chart:render:prod:
 # ============================================================
 
 # Secret detection across the full history. Catches exactly the class of
-# mistake this repo already had: infra-base/k8s/env-values/*/secrets.enc.yaml committed unencrypted.
+# mistake this repo already had: environments/*/kubernetes/secrets.enc.yaml committed unencrypted.
 security:gitleaks:
   stage: test
   image: $CI_IMAGE
@@ -337,20 +395,20 @@ security:gitleaks:
   script:
     - gitleaks detect --source . --redact --verbose --exit-code 1
 
-# SOPS guard: every infra-base/k8s/env-values/<env>/secrets.enc.yaml must be encrypted before it can merge.
+# SOPS guard: every environments/<env>/kubernetes/secrets.enc.yaml must be encrypted before it can merge.
 security:sops-encrypted:
   stage: test
   image: $CI_IMAGE
   rules:
     - !reference [.k8s-guard, rules]
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes: [ "infra-base/k8s/env-values/*/secrets.enc.yaml" ]
+      changes: [ "environments/*/kubernetes/secrets.enc.yaml" ]
     - if: $CI_COMMIT_BRANCH
-      changes: [ "infra-base/k8s/env-values/*/secrets.enc.yaml" ]
+      changes: [ "environments/*/kubernetes/secrets.enc.yaml" ]
   script:
     - |
       rc=0
-      for f in infra-base/k8s/env-values/*/secrets.enc.yaml; do
+      for f in environments/*/kubernetes/secrets.enc.yaml; do
         if grep -q "^sops:" "$f" || grep -q "ENC\[" "$f"; then
           echo "[OK]   $f is SOPS-encrypted"
         else
@@ -371,15 +429,51 @@ security:hadolint:
   script:
     - hadolint ci/images/Dockerfile ci/images/Dockerfile.ci ci/images/Dockerfile.runner
 
+# ─── environments/<env>/kubernetes/cluster + scripts/cluster — cluster metadata + read-only preflight ───
+# Offline only: no cluster, no kubeconfig, no AWS role. `inherit: default: false` drops
+# the default AWS_OIDC_TOKEN, so these jobs cannot assume any role. Live preflight runs
+# from an operator's machine (make k8s-preflight); see docs/clusters/README.md.
+k8s-env:schema:
+  stage: lint
+  inherit:
+    default: false
+  image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
+  rules:
+    - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
+    - changes: [ "environments/*/kubernetes/cluster/**/*", "scripts/cluster/**/*" ]
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  script:
+    - 'pip install --quiet --require-hashes --only-binary=:all: -r ci/terraform/requirements.txt'
+    - yamllint --strict -c terraform/.yamllint.yml environments/dev/kubernetes/cluster environments/staging/kubernetes/cluster environments/prod/kubernetes/cluster
+    - check-jsonschema --check-metaschema scripts/cluster/schemas/*.json
+    - check-jsonschema --schemafile scripts/cluster/schemas/cluster.schema.json $(find environments/dev/kubernetes/cluster environments/staging/kubernetes/cluster environments/prod/kubernetes/cluster -name '*.yaml' ! -name environment.yaml ! -name 'target*.yaml' | sort)
+    - check-jsonschema --schemafile scripts/cluster/schemas/environment.schema.json environments/*/kubernetes/cluster/environment.yaml
+
+k8s-env:test:
+  stage: lint
+  inherit:
+    default: false
+  image: $CI_IMAGE
+  rules:
+    - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
+    - changes: [ "environments/*/kubernetes/cluster/**/*", "scripts/cluster/**/*" ]
+  script:
+    - bash scripts/cluster/check-metadata.sh
+    - bash scripts/cluster/tests/preflight-test.sh
+
 chart:package:
   stage: build
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE != "trigger"
       changes:
-        - k8s/charts/**/*
+        - kubernetes/charts/**/*
   script:
     - CHART_VERSION=$(grep '^version:' charts/application/Chart.yaml | awk '{print $2}')
     - echo "CHART_VERSION=$CHART_VERSION" >> chart.env
@@ -387,9 +481,9 @@ chart:package:
     - 'echo "Packaged: dist/${CHART_NAME}-${CHART_VERSION}.tgz"'
   artifacts:
     paths:
-      - k8s/dist/
+      - kubernetes/dist/
     reports:
-      dotenv: k8s/chart.env
+      dotenv: kubernetes/chart.env
     expire_in: 1 week
 
 # SBOM for the packaged chart + a scan of the images it references. Produces
@@ -397,13 +491,14 @@ chart:package:
 chart:scan:
   stage: scan
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
   image: $CI_IMAGE
   needs:
     - job: chart:package
       artifacts: true
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE != "trigger"
       <<: *chart-changes
   script:
@@ -411,15 +506,15 @@ chart:scan:
       set -eu
       mkdir -p reports
       # Config scan of the manifests that will ACTUALLY be applied: every app's
-      # prod layers (env-values → infra-base/k8s/env-values/prod → applications/<app>/k8s → k8s/prod).
+      # prod layers (environments/prod/kubernetes/ → applications/<app>/k8s/prod).
       # These layers hold no secrets, so no key is needed, and the rendered
       # manifests stay in a temp dir — they are not kept as an artifact.
       RENDER_DIR="$(mktemp -d)"
       for app in ../applications/*/k8s/; do
         app="$(basename "$(dirname "$app")")"
         helm template "$app" charts/application \
-          -f ../infra-base/k8s/env-values/app-values.yaml.gotmpl -f ../infra-base/k8s/env-values/prod/app-values.yaml.gotmpl \
-          -f "../applications/${app}/k8s/values.yaml" -f "../applications/${app}/k8s/prod/values.yaml" \
+          -f ../environments/prod/kubernetes/app-values.yaml.gotmpl \
+          -f "../applications/${app}/k8s/prod/values.yaml" \
           > "${RENDER_DIR}/${app}.yaml"
       done
 
@@ -434,7 +529,7 @@ chart:scan:
       echo "[OK] SBOM: reports/chart-sbom.cdx.json"
   artifacts:
     paths:
-      - k8s/reports/
+      - kubernetes/reports/
     expire_in: 1 month
 
 chart:publish:
@@ -446,11 +541,12 @@ chart:publish:
       artifacts: false
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE != "trigger" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       changes:
-        - k8s/charts/**/*
+        - kubernetes/charts/**/*
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     # Charts live in the shared-infra account, not an environment account.
     - '[ -n "${CHART_PUBLISH_ROLE_ARN:-}" ] || { echo "[ERROR] set CHART_PUBLISH_ROLE_ARN (OIDC role in account ${HELM_CHART_ACCOUNT_ID})"; exit 1; }'
     - printf '%s' "$AWS_OIDC_TOKEN" > "${CI_PROJECT_DIR}/.aws-web-identity-token"
@@ -491,9 +587,10 @@ chart:publish:
 deploy:setup:
   stage: setup
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-protected-ref, rules]
     - if: $CI_PIPELINE_SOURCE == "trigger"
     - if: $CI_PIPELINE_SOURCE == "web"
   script:
@@ -515,8 +612,16 @@ deploy:setup:
       # Dry-run: validate all templates render cleanly before applying
       cd .
       export HELMFILE_WORKDIR=$(mktemp -d)
+      # A valid application name (.deploy-inputs) is not a deployable release:
+      # the selector needs a layer=app release of that name in kubernetes/.
+      if ! helmfile -e "$DEPLOY_ENV" --selector "layer=app,name=${SERVICE_NAME}" list > /dev/null; then
+        echo "[ERROR] kubernetes/ has no layer=app helmfile release named '${SERVICE_NAME}'."
+        echo "        The app tier is delivered by Argo CD (kubernetes/argocd/bootstrap/applicationset-apps.yaml);"
+        echo "        this helmfile deploy path cannot deploy it (ci/README.md, Gates)."
+        exit 1
+      fi
       IMAGE_TAG=$IMAGE_TAG helmfile \
-        --selector name=$SERVICE_NAME \
+        --selector "layer=app,name=${SERVICE_NAME}" \
         -e $DEPLOY_ENV \
         template > /dev/null
       echo "[OK] Template render passed"
@@ -526,6 +631,7 @@ deploy:apply:
   needs: ["deploy:setup"]
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-protected-ref, rules]
     # PROD REQUIRES A HUMAN. Previously prod deployed automatically on any
     # pipeline trigger from a source repo — a merge in an app repo could ship
     # straight to production with no approval. The infrastructure pipeline
@@ -543,7 +649,7 @@ deploy:apply:
   # One deploy (or rollback) of a service per environment at a time.
   resource_group: $DEPLOY_ENV-$SERVICE_NAME
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - *env-select
     - *deploy-inputs
     - *config-complete
@@ -559,7 +665,7 @@ deploy:apply:
 
       cd .
       IMAGE_TAG=$IMAGE_TAG helmfile sync \
-        --selector name=$SERVICE_NAME \
+        --selector "layer=app,name=${SERVICE_NAME}" \
         -e $DEPLOY_ENV
 
       echo "[INFO] Deploy complete"
@@ -579,7 +685,7 @@ deploy:apply:
 # ============================================================
 # ROLLBACK — manual safety net.
 #
-# helmDefaults in infra-base/k8s/env-values/repositories.yaml sets atomic:false and cleanupOnFail:false
+# helmDefaults in kubernetes/repositories.yaml sets atomic:false and cleanupOnFail:false
 # (deliberately, so a failed release can be inspected). The trade-off is that
 # nothing rolls back on its own, and until now the pipeline had no rollback
 # path at all. `helm rollback` returns the release to the previous revision;
@@ -594,6 +700,7 @@ deploy:rollback:
   resource_group: $DEPLOY_ENV-$SERVICE_NAME
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-protected-ref, rules]
     - if: $CI_PIPELINE_SOURCE == "trigger"
       when: manual
       allow_failure: false
@@ -604,7 +711,7 @@ deploy:rollback:
     name: $DEPLOY_ENV/$SERVICE_NAME
     action: stop
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - *env-select
     - *deploy-inputs
     - *aws-auth

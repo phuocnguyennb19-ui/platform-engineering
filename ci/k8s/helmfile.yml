@@ -9,7 +9,7 @@
 # → selector `layer=platform` so it never touches app-tier releases.
 #
 # Trigger: changes to any tool/app values or helmfile fragment, or environments/
-# (argocd/ = Argo CD's own workflow).
+# (kubernetes/argocd/ = Argo CD's own workflow).
 #
 # Branch → Env:  dev/develop/feature/* → dev · staging/release/* → staging
 #                main/master → prod (manual)
@@ -22,7 +22,7 @@
 .helmfile:
   image: $DEPLOY_TOOLS_IMAGE
   variables:
-    HELMFILE_DIR: "$CI_PROJECT_DIR/k8s"
+    HELMFILE_DIR: "$CI_PROJECT_DIR/kubernetes"
   before_script:
     - !reference [.ci-env-select, script]
     - !reference [.ci-aws-auth, script]
@@ -34,18 +34,18 @@
 # ── LINT — render every release (no cluster needed) ─────────
 .helmfile-lint-changes: &helmfile-lint-changes
   changes:
-    - k8s/helmfile.yaml.gotmpl
-    - "infra-base/k8s/env-values/**/*"
-    - "k8s/platform/*/helmfile.yaml.gotmpl"
-    - "infra-base/k8s/platform/**/*"         # tool values: common + <env>/ (and files/)
-    - "infra-base/k8s/monitoring/**/*"
-    - "k8s/apps/*/helmfile.yaml.gotmpl"
-    - "k8s/apps/*/values.yaml.gotmpl"
-    - "k8s/apps/*/config/**/*"
-    - "k8s/apps/*/secrets.yaml.gotmpl"
-    - "monitoring/**/*"
-    # argocd/ is Argo CD's own workflow (ci/k8s/argocd.yml); */manifests/** are
-    # kubectl-applied out of band, so a helmfile pipeline cannot act on them.
+    - kubernetes/helmfile.yaml.gotmpl
+    - "kubernetes/repositories.yaml"
+    - "environments/dev/kubernetes/**/*"              # <env>/{tools,ingress,monitoring}/<tool>/, app-values, secrets
+    - "environments/staging/kubernetes/**/*"
+    - "environments/prod/kubernetes/**/*"
+    - "kubernetes/releases/platform/*/helmfile.yaml.gotmpl"
+    - "kubernetes/releases/observability/**/*"
+    # Kong's plugins are part of the kong release (extra-objects.yaml.gotmpl wraps manifests/plugins.yaml).
+    - "kubernetes/releases/platform/kong/extra-objects.yaml.gotmpl"
+    - "kubernetes/releases/platform/kong/manifests/plugins.yaml"
+    # kubernetes/argocd/ is Argo CD's own workflow (ci/k8s/argocd.yml); every other */manifests/**
+    # is kubectl-applied out of band, so a helmfile pipeline cannot act on it.
 
 # One render per environment, each with only that environment's SOPS key.
 # Staging and prod keys are protected variables, so those run on protected refs.
@@ -54,7 +54,7 @@
   stage: hf-lint
   # lint only renders → no cluster access
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - !reference [.ci-env-select, script]
     - !reference [.ci-sops-setup, script]
   script:
@@ -66,6 +66,7 @@ helmfile:lint:dev:
   variables: { DEPLOY_ENV: dev }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       <<: *helmfile-lint-changes
     - if: $CI_COMMIT_BRANCH
@@ -76,6 +77,7 @@ helmfile:lint:staging:
   variables: { DEPLOY_ENV: staging }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
       <<: *helmfile-lint-changes
 
@@ -84,12 +86,13 @@ helmfile:lint:prod:
   variables: { DEPLOY_ENV: prod }
   # prod decrypts through KMS, which needs the deploy role
   before_script:
-    - cd "$CI_PROJECT_DIR/k8s"
+    - cd "$CI_PROJECT_DIR/kubernetes"
     - !reference [.ci-env-select, script]
     - !reference [.ci-aws-auth, script]
     - !reference [.ci-sops-setup, script]
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
       <<: *helmfile-lint-changes
 
@@ -106,6 +109,7 @@ helmfile:diff:dev:
   variables: { DEPLOY_ENV: dev }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH =~ /^(dev|develop|feature\/.*)$/
       <<: *helmfile-lint-changes
 
@@ -114,6 +118,7 @@ helmfile:diff:staging:
   variables: { DEPLOY_ENV: staging }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH =~ /^(staging|release\/.*)$/
       <<: *helmfile-lint-changes
 
@@ -122,6 +127,7 @@ helmfile:diff:prod:
   variables: { DEPLOY_ENV: prod }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/
       <<: *helmfile-lint-changes
 
@@ -144,6 +150,7 @@ helmfile:sync:dev:
   variables: { DEPLOY_ENV: dev }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH =~ /^(dev|develop)$/
       <<: *helmfile-lint-changes
 
@@ -153,6 +160,7 @@ helmfile:sync:staging:
   variables: { DEPLOY_ENV: staging }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH == "staging"
       <<: *helmfile-lint-changes
 
@@ -162,6 +170,7 @@ helmfile:sync:prod:
   variables: { DEPLOY_ENV: prod }
   rules:
     - !reference [.k8s-guard, rules]
+    - !reference [.k8s-push-mr-only, rules]
     - if: $CI_COMMIT_BRANCH =~ /^(main|master)$/
       when: manual                       # prod always requires manual approval
       <<: *helmfile-lint-changes

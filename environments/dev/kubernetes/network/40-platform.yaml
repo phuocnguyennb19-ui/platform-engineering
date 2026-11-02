@@ -1,0 +1,129 @@
+# ============================================================
+# PLATFORM LEAF NAMESPACES — `velero`, `trivy-system`
+#
+# Leaf namespaces: nothing calls INTO them except Prometheus scraping.
+# Their real work is OUTBOUND, which the 00-baseline.yaml egress-deny now
+# restricts to in-cluster + DNS — so both need an explicit internet grant.
+#
+# ⚠ NOT COVERED — deliberate, inherited:
+#   `infra`       hosts cert-manager, external-secrets, kyverno, kong, ingress-nginx (legacy)
+#                 and argocd (only the Kong pods are covered — `platform-kong` at the
+#                 end of this file), whose admission/conversion webhooks are called BY
+#                 THE API SERVER. No pod- or namespace-selector can match the
+#                 API server, so a default-deny there breaks the cluster
+#                 control path. Harden with ipBlock rules — pattern in
+#                 10-monitoring.yaml → prometheus-operator.
+#   `kube-system` CoreDNS and metrics-server are reached by every pod and by
+#                 the aggregation layer. Policy here breaks DNS cluster-wide.
+#   `vault` · `harbor` · `falco` · `keda` have no policy yet.
+# ============================================================
+
+# ── velero ──────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-velero
+  namespace: velero
+  labels: { workload: velero }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: velero
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 8085 }   # velero metrics
+  egress:
+    # Off-cluster backup targets (S3/GCS/Azure) and the cloud provider API.
+    # In-cluster MinIO is already reachable via the baseline; this covers the
+    # case where backupStorageLocation points off-cluster.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254/32]
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# ── trivy-operator ──────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-trivy-operator
+  namespace: trivy-system
+  labels: { workload: trivy-operator }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: trivy-operator
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 8080 }   # trivy-operator metrics
+  egress:
+    # Vulnerability DB downloads (ghcr.io) and image pulls from external
+    # registries during scanning. Without this every scan fails with a DB
+    # download error — and a scanner that cannot update its DB reports CLEAN,
+    # which is worse than reporting broken.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254/32]
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# ── kong (infra) ────────────────────────────────────────────
+# Kong is the only internet-facing ingress. This policy selects ONLY the Kong pods — the
+# rest of `infra` stays uncovered (webhooks, see the header). Its point is the admin API:
+# DB-less Kong's admin API (:8444) has no authentication, so any pod that reaches it can
+# POST /config and take over every route. Port 8444 is not listed → refused from every
+# other pod; the ingress controller reaches it over localhost (same pod, CONTROLLER_KONG_ADMIN_URL
+# https://localhost:8444), which NetworkPolicy does not filter.
+# Pod labels from the kong chart (fullnameOverride: kong): app.kubernetes.io/name: kong,
+# app.kubernetes.io/instance: kong. Re-verify after a chart bump:
+#   kubectl -n infra get pods -l app.kubernetes.io/name=kong --show-labels
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-kong
+  namespace: infra
+  labels: { workload: kong }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kong
+      app.kubernetes.io/instance: kong
+  policyTypes: [Ingress]
+  ingress:
+    # Data plane: the load balancer (client or node addresses) and in-cluster callers.
+    - from:
+        - ipBlock: { cidr: 0.0.0.0/0 }
+        - namespaceSelector: {}
+      ports:
+        - { protocol: TCP, port: 8000 }    # proxy (Service kong-proxy :80)
+        - { protocol: TCP, port: 8443 }    # proxy-tls (Service kong-proxy :443)
+    # KIC admission webhook (ValidatingWebhookConfiguration kong-infra-validations), called
+    # by the API server — not a pod, so ipBlock; RFC1918 as for prometheus-operator
+    # (10-monitoring.yaml). 🔧 narrow to the control-plane addresses: kubectl get endpoints kubernetes -n default
+    - from:
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 172.16.0.0/12 }
+        - ipBlock: { cidr: 192.168.0.0/16 }
+      ports:
+        - { protocol: TCP, port: 8080 }    # webhook
+    # Metrics and status for Prometheus.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 8100 }    # kong status (/status, /metrics)
+        - { protocol: TCP, port: 10254 }   # controller status
+        - { protocol: TCP, port: 10255 }   # controller metrics

@@ -1,0 +1,111 @@
+# ============================================================
+# OpenTelemetry Collector — OTLP gateway (deployment mode)
+# Chart: open-telemetry/opentelemetry-collector
+#
+# Single ingest point for app telemetry. Apps send OTLP to:
+#   opentelemetry-collector.<ns>.svc.<domain>:4317 (gRPC) / :4318 (HTTP)
+# Collector fans out:
+#   traces  → Tempo   (otlp/grpc :4317)
+#   metrics → Prometheus (scrapes the collector's :8889)
+#   logs    → Loki    (native OTLP /otlp endpoint)
+#
+# contrib image is required for the k8sattributes processor and the
+# extra exporters used below.
+# ============================================================
+
+fullnameOverride: opentelemetry-collector
+
+mode: deployment
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+# Enrich every signal with k8s metadata (pod, namespace, node, labels).
+presets:
+  kubernetesAttributes:
+    enabled: true
+  # We do NOT collect node logs here — Alloy owns that (DaemonSet).
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Expose the metrics port so Prometheus can scrape exported app metrics.
+ports:
+  metrics:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+# Let kube-prometheus-stack scrape both the collector's own telemetry
+# and the prometheus-exporter output.
+serviceMonitor:
+  enabled: true
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    # Guardrail against OOM under load — spill/refuse above the soft limit.
+    # Guardrail against OOM under load — spill/refuse above the soft limit.
+    memory_limiter:
+      check_interval: 1s
+      limit_mib: 900
+      spike_limit_mib: 225
+    batch:
+      timeout: 5s
+      send_batch_size: 1024
+      send_batch_max_size: 2048
+
+  exporters:
+    # Traces → Tempo
+    otlp/tempo:
+      endpoint: tempo.{{ (.Values.namespace) }}.svc.{{ (.Values.clusterDomain) }}:4317
+      tls:
+        insecure: true          # in-cluster; enable mTLS via cert-manager in prod
+    # Metrics → exposed for Prometheus scrape
+    prometheus:
+      endpoint: 0.0.0.0:8889
+      resource_to_telemetry_conversion:
+        enabled: true
+    # Logs → Loki native OTLP ingestion
+    otlphttp/loki:
+      endpoint: http://loki-gateway.{{ (.Values.namespace) }}.svc.{{ (.Values.clusterDomain) }}/otlp
+      tls:
+        insecure: true
+
+  extensions:
+    health_check:
+      endpoint: 0.0.0.0:13133
+
+  service:
+    extensions: [health_check]
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp/tempo]
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [prometheus]
+      logs:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlphttp/loki]
+replicaCount: 2
+
+resources:
+  requests: { cpu: 200m, memory: 512Mi }
+  limits:   { cpu: 1, memory: 1Gi }

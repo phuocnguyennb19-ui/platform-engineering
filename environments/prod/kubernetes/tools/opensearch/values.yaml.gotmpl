@@ -1,0 +1,112 @@
+# ============================================================
+# OpenSearch — search / log-analytics cluster
+# Chart: opensearch/opensearch  (StatefulSet)
+#
+# dev     → single node (discovery.type=single-node), small PVC
+# staging → 3 nodes, moderate PVC
+# prod    → 3 nodes, larger PVC, PDB, anti-affinity, HEAP tuned
+#
+# Security: the chart ships DEMO TLS certs + default admin password.
+# For staging/prod you MUST replace them:
+#   - provide real node/admin certs via a secret
+#   - set OPENSEARCH_INITIAL_ADMIN_PASSWORD from a SOPS secret
+# ============================================================
+
+clusterName: opensearch
+nodeGroup: master
+# Service name apps/Grafana use: opensearch-cluster-master
+masterService: opensearch-cluster-master
+
+roles:
+  - master
+  - ingest
+  - data
+  - remote_cluster_client
+
+persistence:
+  enabled: true
+  {{- if (.Values.storageClass) }}
+  storageClass: {{ (.Values.storageClass) }}
+  {{- end }}
+  accessModes: ["ReadWriteOnce"]
+  size: 200Gi
+
+# Node bootstrap: raise mmap limit for Lucene.
+sysctlInit:
+  enabled: true
+
+# ── Security ────────────────────────────────────────────────
+# Admin password comes from the centralized SOPS env-secret
+# (.Values.secrets.opensearch.password). This release OWNS the shared
+# `opensearch-admin` Secret (extraObjects below); the pod reads it via
+# secretKeyRef — password stays in a Secret, never in the pod spec.
+# OpenSearch Dashboards + Grafana consume the SAME value.
+extraEnvs:
+  - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: opensearch-admin
+        key: password
+
+# Shared opensearch-admin Secret, materialized from the SOPS env-secret.
+extraObjects:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: opensearch-admin
+      labels:
+        app.kubernetes.io/part-of: observability
+        tier: infra
+    type: Opaque
+    stringData:
+      username: admin
+      password: {{ .Values.secrets.opensearch.password | quote }}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+
+# Scrape via prometheus-exporter plugin if installed; ServiceMonitor optional.
+serviceMonitor:
+  enabled: false
+replicas: 3
+opensearchJavaOpts: "-Xms2g -Xmx2g"
+
+resources:
+  requests: { cpu: 2, memory: 4Gi }
+  limits:   { cpu: 4, memory: 8Gi }
+# Spread data nodes across nodes/zones; keep quorum during disruptions.
+antiAffinity: hard
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/instance: opensearch
+# staging/prod: replace demo certs. Mount your real certs and point the
+# security plugin at them. Placeholder secret name below.
+secretMounts:
+  - name: opensearch-certs
+    secretName: opensearch-tls
+    path: /usr/share/opensearch/config/certs
+    defaultMode: 0400
+config:
+  opensearch.yml: |
+    cluster.name: opensearch
+    network.host: 0.0.0.0
+    plugins.security.ssl.transport.pemcert_filepath: certs/tls.crt
+    plugins.security.ssl.transport.pemkey_filepath: certs/tls.key
+    plugins.security.ssl.transport.pemtrustedcas_filepath: certs/ca.crt
+    plugins.security.ssl.http.enabled: true
+    plugins.security.ssl.http.pemcert_filepath: certs/tls.crt
+    plugins.security.ssl.http.pemkey_filepath: certs/tls.key
+    plugins.security.ssl.http.pemtrustedcas_filepath: certs/ca.crt
+    plugins.security.allow_default_init_securityindex: true

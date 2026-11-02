@@ -1,0 +1,14 @@
+{{- /* nginx.conf of the proxy sidecar (proxy.*). Content changes roll the app pods
+       via checksum/proxy-config on the pod template. */ -}}
+{{- if (.Values.proxy).enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "application.proxy.configmapName" . }}
+  namespace: {{ include "application.namespace" . }}
+  labels:
+    {{- include "application.labels" (dict "root" $ "component" "app") | nindent 4 }}
+data:
+  nginx.conf: |
+    {{- include "application.proxy.nginxConf" . | nindent 4 }}
+{{- end }}

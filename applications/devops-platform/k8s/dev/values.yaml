@@ -1,0 +1,76 @@
+# devops-platform · dev — toàn bộ value của app ở môi trường này (chart kubernetes/charts/application).
+# Thêm cấu hình: thêm key vào file này. Mọi key: docs/reference/application-chart.md
+
+# Cùng image với local, kéo thẳng từ Docker Hub (không qua global.imageRegistry của dev).
+# Khi chuyển sang ECR của môi trường: bỏ `registry`, đổi repository về `devops-platform`
+# và copy image theo digest vào ECR trước khi deploy.
+image:
+  registry: docker.io
+  repository: phuocnguyennb1919/temp-lab-devops-platform
+  tag: "v1.0.0"
+  digest: sha256:ab0419d36e9195b6e88c891917b8dd8096b69af1b3653a592a0f381b4cb8a61f
+  pullPolicy: IfNotPresent
+
+probes:
+  startup: {httpGet: {path: /health, port: http}, failureThreshold: 15, periodSeconds: 2}
+  liveness: {httpGet: {path: /health, port: http}, periodSeconds: 15, timeoutSeconds: 3}
+  readiness: {httpGet: {path: /health, port: http}, periodSeconds: 10, timeoutSeconds: 3}
+
+resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {cpu: 200m, memory: 128Mi}
+
+# nginx chạy non-root với readOnlyRootFilesystem: pid + temp path đưa vào /tmp.
+extraVolumes:
+  - name: tmp
+    emptyDir: {medium: Memory, sizeLimit: 32Mi}   # tmpfs counts against limits.memory (128Mi) — keep it small
+  - name: nginx-conf
+    configMap:
+      name: devops-platform-application-nginx
+      items: [{key: nginx.conf, path: nginx.conf}]
+
+extraVolumeMounts:
+  - {name: tmp, mountPath: /tmp}
+  - {name: nginx-conf, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true}
+
+extraConfigMaps:
+  nginx:
+    nginx.conf: |
+      worker_processes 1;
+      error_log /dev/stderr warn;
+      pid /tmp/nginx.pid;
+      events { worker_connections 1024; }
+      http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        access_log /dev/stdout;
+        client_body_temp_path /tmp/client_temp;
+        proxy_temp_path       /tmp/proxy_temp;
+        fastcgi_temp_path     /tmp/fastcgi_temp;
+        uwsgi_temp_path       /tmp/uwsgi_temp;
+        scgi_temp_path        /tmp/scgi_temp;
+        sendfile on;
+        keepalive_timeout 65;
+        server_tokens off;
+        include /etc/nginx/conf.d/*.conf;
+      }
+
+initContainers: []
+
+workers: []
+
+# `helm test` dùng chính image của app (chart không ghép registry cho tests.image).
+tests:
+  image: docker.io/phuocnguyennb1919/temp-lab-devops-platform:v1.0.0@sha256:ab0419d36e9195b6e88c891917b8dd8096b69af1b3653a592a0f381b4cb8a61f
+
+ingress:
+  enabled: true
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+  hosts:
+    - host: devops-platform.dev.example.com
+      paths:
+        - {path: /, pathType: Prefix}
+  tls:
+    - secretName: devops-platform-tls
+      hosts: ["devops-platform.dev.example.com"]

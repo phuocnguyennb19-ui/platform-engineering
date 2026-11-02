@@ -1,0 +1,114 @@
+# ============================================================
+# ROOT helmfile — only INCLUDES the per-tool states (helmfiles:). No releases here.
+#
+# kubernetes/ layout — a folder's ROLE is still read off its `layer` label:
+#
+#   releases/platform/<tool>/       one helm release (helmfile.yaml.gotmpl: chart + version + labels)
+#   releases/platform/gateway-api/  kubectl, NOT helm (namespaces + NetworkPolicies: ../environments/<env>/kubernetes/)
+#   charts/          the in-house `application` chart (app releases: ../applications/helmfile.yaml.gotmpl, not here)
+#   releases/observability/<tool>/  observability releases (kube-prometheus-stack, grafana, loki, …)
+#   argocd/                         Argo CD App-of-Apps (alternative owner of the app tier)
+#   docs/            cross-cutting runbooks
+#
+# Values are NOT here — templates here, values in ../environments/<env>/kubernetes/:
+#   <env>/                      state.yaml · app-values.yaml.gotmpl · secrets.enc.yaml (SOPS)
+#                               tools|ingress|monitoring/<tool>/ (complete per env, + files/) · namespace/ ·
+#                               network/ · cluster/
+#   Chart repos + helmDefaults: ./repositories.yaml
+#
+# Inside a tool folder here:
+#   helmfile.yaml.gotmpl   the release (chart, version, namespace, labels, values list)
+#   manifests/             raw k8s manifests — kubectl apply, NOT rendered by helm
+#   README.md              runbook for that one tool
+#
+# ⚠ helmfiles: = SEPARATE states → `needs` does NOT work across folders.
+#   DEPLOY ORDER IS THIS LIST, and nothing else. Reordering it changes what
+#   installs first; the reasons are inline below. `needs` is unusable here
+#   because every folder is its own state.
+#
+# Deploy (from the repo root; no release here pins a kube context — always pass --kube-context,
+# otherwise helm uses the kubeconfig current-context). Step by step: docs/20-runbooks/kubernetes-manual.md
+#   kubectl --context=<ctx> apply -f environments/<env>/kubernetes/namespace/      # PSA namespaces FIRST
+#   H="helmfile -e dev --kube-context <ctx> -f kubernetes/helmfile.yaml.gotmpl"
+#   $H repos && $H -l layer=platform diff && $H -l layer=platform sync             # every tool, in order
+#   helmfile -e dev --kube-context <ctx> -f kubernetes/releases/observability/loki/helmfile.yaml.gotmpl sync  # one tool
+#   $H -l component=logs sync                                                       # one concern
+# Apps are NOT here: helmfile -e dev -l name=<app> sync (root helmfile → ../applications/).
+# ============================================================
+
+bases:
+  - repositories.yaml
+environments:
+  dev:     { values: [ ../environments/dev/kubernetes/state.yaml ] }
+  staging: { values: [ ../environments/staging/kubernetes/state.yaml ] }
+  prod:    { values: [ ../environments/prod/kubernetes/state.yaml ] }
+
+---
+
+helmfiles:
+  # ── cluster base ──────────────────────────────────────────────────────────
+  # prometheus-operator-crds FIRST: the ServiceMonitor / PrometheusRule CRDs that
+  # nearly every other tool's values reference (kube-prometheus-stack runs with
+  # crds.enabled: false). Move it down and everything after it fails to install.
+  - path: releases/observability/prometheus-operator-crds/helmfile.yaml.gotmpl
+  - path: releases/observability/kube-prometheus-stack/helmfile.yaml.gotmpl
+  - path: releases/platform/metrics-server/helmfile.yaml.gotmpl
+  - path: releases/platform/karpenter/helmfile.yaml.gotmpl
+  - path: releases/platform/cluster-autoscaler/helmfile.yaml.gotmpl   # karpenter OR this: nodeAutoscaler in <env>/kubernetes/state.yaml
+  - path: releases/platform/reloader/helmfile.yaml.gotmpl
+  - path: releases/platform/keda/helmfile.yaml.gotmpl
+
+  # ── networking ────────────────────────────────────────────────────────────
+  # Right after the cluster base, before every tool that has an Ingress (minio console,
+  # opensearch-dashboards, grafana, vault, argocd, harbor): those Ingresses use class kong and
+  # reference Kong's KongClusterPlugins (konghq.com/plugins: request-size-limit), which the
+  # kong release installs. A tool synced before kong would get routes Kong rejects.
+  # cert-manager first: it creates the `infra` namespace and must exist before
+  # anything requests a Certificate (vault does, below).
+  - path: releases/platform/cert-manager/helmfile.yaml.gotmpl
+  # legacy, being retired: installed only while state.yaml ingressNginx: true (kong/README.md §8)
+  - path: releases/platform/ingress-nginx/helmfile.yaml.gotmpl
+  - path: releases/platform/kong/helmfile.yaml.gotmpl
+  - path: releases/platform/external-dns/helmfile.yaml.gotmpl
+
+  # ── data ──────────────────────────────────────────────────────────────────
+  # minio first — it creates the `database` namespace and is the object store
+  # that mimir/loki/tempo/velero/harbor all write to.
+  - path: releases/platform/minio/helmfile.yaml.gotmpl
+  - path: releases/platform/postgresql/helmfile.yaml.gotmpl
+  - path: releases/platform/redis/helmfile.yaml.gotmpl
+  - path: releases/platform/kafka/helmfile.yaml.gotmpl
+  - path: releases/platform/clickhouse/helmfile.yaml.gotmpl
+
+  # ── observability ─────────────────────────────────────────────────────────
+  # Backends before their clients: loki/tempo/opensearch exist before alloy,
+  # otel-collector and grafana point at them.
+  - path: releases/observability/loki/helmfile.yaml.gotmpl
+  - path: releases/observability/tempo/helmfile.yaml.gotmpl
+  - path: releases/observability/mimir/helmfile.yaml.gotmpl
+  - path: releases/platform/opensearch/helmfile.yaml.gotmpl
+  - path: releases/platform/opensearch-dashboards/helmfile.yaml.gotmpl
+  - path: releases/observability/opentelemetry-collector/helmfile.yaml.gotmpl
+  - path: releases/observability/alloy/helmfile.yaml.gotmpl
+  - path: releases/observability/grafana/helmfile.yaml.gotmpl
+
+  # ── security ──────────────────────────────────────────────────────────────
+  # After networking: vault's ingress + TLS cert need cert-manager and an
+  # IngressClass. After observability: falco ships alerts to loki.
+  - path: releases/platform/vault/helmfile.yaml.gotmpl
+  - path: releases/platform/external-secrets/helmfile.yaml.gotmpl
+  - path: releases/platform/sealed-secrets/helmfile.yaml.gotmpl
+  - path: releases/platform/kyverno/helmfile.yaml.gotmpl
+  - path: releases/platform/trivy-operator/helmfile.yaml.gotmpl
+  - path: releases/platform/falco/helmfile.yaml.gotmpl
+
+  # ── delivery ──────────────────────────────────────────────────────────────
+  # harbor LAST of the infra tier: it needs postgresql, redis, minio and ingress.
+  - path: releases/platform/argocd/helmfile.yaml.gotmpl
+  - path: releases/platform/velero/helmfile.yaml.gotmpl
+  - path: releases/platform/harbor/helmfile.yaml.gotmpl
+
+  # ── applications ──────────────────────────────────────────────────────────
+  # Not in this file: apps are released from ../applications/helmfile.yaml.gotmpl (via the
+  # repo-root helmfile, `-l name=<app>`), after this list — they need kong (IngressClass kong)
+  # and metrics-server (HPA). Argo CD instead: kubernetes/argocd/ (never both owners).

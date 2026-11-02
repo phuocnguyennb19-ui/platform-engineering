@@ -1,0 +1,75 @@
+# ── NetworkPolicies of namespace `staging` (this environment's app tier) ──
+# ============================================================
+# APPLICATION TIER — namespaces `dev`, `staging`, `prod`
+#
+# ⚠ THIS FILE IS DELIBERATELY THIN — the app tier is the one tier where the
+#   workload owns its own policy. charts/application emits a per-release
+#   NetworkPolicy from `networkPolicy.*` in environments/<env>/kubernetes/app-values.yaml.gotmpl and
+#   <app>/values.yaml.gotmpl: scoped to that release's pods, with both ingress
+#   and egress. That is the big-tech shape already — policy ships with the
+#   service, versioned with it, deployed by the same release.
+#
+#   So this file adds ONLY what no single release can own:
+#     · the namespace floor, so a pod deployed by something OTHER than the app
+#       chart (a debug pod, a Job, a chart with networkPolicy disabled) is not
+#       silently unprotected;
+#     · Prometheus scrape, which must hold for every release uniformly — at dev
+#       environments/dev/kubernetes/app-values.yaml.gotmpl sets no `fromNamespaces`, so the chart policy
+#       alone leaves every dev ServiceMonitor reporting "down".
+#
+#   Per-app rules do NOT belong here. Add them to <app>/values.yaml.gotmpl —
+#   see "Adding app-specific rules" in README.md.
+#
+# The namespace-wide default-deny (Ingress + Egress) is in 00-baseline.yaml.
+# Ports come from environments/prod/kubernetes/app-values.yaml.gotmpl: 8080 app HTTP · 9090 /metrics.
+# ============================================================
+
+# ════════ dev ════════
+
+# ════════ staging ════════
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: staging
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controllers
+  namespace: staging
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-scrape
+  namespace: staging
+  labels: { managed-by: platform }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 9090 }

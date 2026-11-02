@@ -1,0 +1,55 @@
+# Velero — cluster + PV backup/DR to S3   # prod 30d · non-prod 7d
+
+# AWS object-store + snapshot plugin.
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.11.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+# Prefer IRSA over static keys — annotate the SA, keep useSecret false.
+credentials:
+  useSecret: false
+serviceAccount:
+  server:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::{{ requiredEnv "AWS_ACCOUNT_ID" }}:role/{{ .Values.eksClusterName }}-irsa-velero
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: {{ .Values.platformName }}-velero-{{ requiredEnv "AWS_ACCOUNT_ID" }}   # terraform core output velero_bucket
+      config:
+        region: ap-southeast-1
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: ap-southeast-1
+
+# File-level PV backup (Kopia) — needed for PVCs without CSI snapshot support.
+deployNodeAgent: true
+
+# Scheduled daily backup.
+# Scheduled daily backup.
+schedules:
+  daily-full:
+    disabled: false
+    schedule: "0 2 * * *"
+    template:
+      includedNamespaces:
+        - "*"
+      storageLocation: default
+      ttl: 720h0m0s
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true

@@ -1,0 +1,54 @@
+# __APP__ · __ENV__ — TOÀN BỘ value của app ở môi trường này (chart kubernetes/charts/application).
+# Mỗi môi trường một file đầy đủ, không có file chung của app.
+# Không gotmpl, không secret: Argo CD đọc file này dạng YAML thuần.
+# Mọi key có thể đặt: docs/reference/application-chart.md
+# Môi trường đã đặt sẵn (registry, securityContext, NetworkPolicy, resources theo tier):
+#   environments/<env>/kubernetes/app-values.yaml.gotmpl, environments/<env>/kubernetes/app-values.yaml.gotmpl
+# → chỉ ghi ở đây cái app này cần.
+
+image:
+  # Tên repository ECR = image.repository trong ../terraform/app.yaml. Registry
+  # (host) do môi trường đặt qua global.imageRegistry — không ghi host ở đây.
+  repository: __APP__
+  # không có fallback `latest`: đặt tag (hoặc digest).
+
+# Cổng chuẩn của tầng app: container nghe 8080 (cổng `http`, chart tự tạo từ
+# service.targetPort, mặc định 8080) và 9090 cho /metrics — đúng hai cổng
+# NetworkPolicy mặc định của môi trường mở.
+extraPorts:
+  - { name: metrics, containerPort: 9090, protocol: TCP }
+
+# Biến môi trường thường (không phải bí mật).
+env: {}
+#  LOG_FORMAT: json
+
+# Bí mật: Secret tên `__APP__` (tạo bởi External Secrets / SealedSecrets trong
+# namespace của môi trường), nạp toàn bộ key thành biến môi trường.
+# Bỏ comment khi Secret đã tồn tại — thiếu Secret thì pod kẹt CreateContainerConfigError.
+# extraEnvFrom:
+#   - secretRef:
+#       name: __APP__
+
+# Bắt buộc cho production (NOTES.txt sẽ nhắc nếu thiếu).
+probes:
+  startup:   { httpGet: { path: /healthz, port: http }, failureThreshold: 30, periodSeconds: 2 }
+  liveness:  { httpGet: { path: /healthz, port: http }, periodSeconds: 15, timeoutSeconds: 3 }
+  readiness: { httpGet: { path: /readyz,  port: http }, periodSeconds: 10, timeoutSeconds: 3 }
+
+# Đo theo mức dùng thật của app; prod có sàn riêng trong environments/prod/kubernetes/app-values.yaml.gotmpl.
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits:   { memory: 256Mi }
+
+# Prometheus chỉ scrape ServiceMonitor có label này.
+serviceMonitor:
+  enabled: true
+  port: metrics
+  path: /metrics
+  interval: 30s
+  labels:
+    release: kube-prometheus-stack
+
+initContainers: []
+
+workers: []

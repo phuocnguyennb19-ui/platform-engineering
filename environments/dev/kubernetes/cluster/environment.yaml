@@ -1,0 +1,19 @@
+# Environment metadata (schemas/environment.schema.json). Read by scripts/preflight.sh and
+# scripts/check-metadata.sh only. Everything else about this environment is owned elsewhere
+# and NOT repeated here — see environments/README.md:
+#   namespace `dev` = Helm environment name   (applications/helmfile.yaml.gotmpl, environments/<env>/kubernetes/namespace/namespaces.yaml)
+#   values / replicas                         (environments/dev/kubernetes/app-values.yaml.gotmpl)
+schema: kubernetes-environment-defaults/v1alpha1
+name: dev
+
+names:                        # translate at the boundary; never rename either side
+  helmfile: dev               # helmfile -e, DEPLOY_ENV, app namespace
+  terraform: dev              # ENVIRONMENT, environments/<dir>/terraform/ (dir = Helm name)
+
+delivery:
+  autoDeploy: false           # policy: no unattended deploy (the schema forbids true for staging/production)
+
+security:
+  # Expected PSA `enforce` level of the app namespace. Applied by the namespace manifest
+  # (named on the next line), not by this file; check-metadata keeps the two equal, preflight checks the live label.
+  podSecurityStandard: restricted   # environments/<env>/kubernetes/namespace/namespaces.yaml

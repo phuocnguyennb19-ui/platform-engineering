@@ -1,0 +1,84 @@
+# ============================================================
+# Grafana Mimir — long-term, horizontally-scalable Prometheus storage
+# Chart: grafana/mimir-distributed · ns `observability`
+#
+# Role: Prometheus (kube-prometheus-stack) remote_writes here for durable,
+# de-duplicated, long-retention metrics; Grafana adds Mimir as a Prometheus
+# datasource for historical queries. Object store = MinIO (S3-compatible).
+#
+# Deployment topology (chart deploymentMode):
+#   dev/staging → monolith  (single `mimir-backend`-style target, 1 replica)
+#   prod        → distributed microservices (per-component replicas + zone-aware)
+#
+# Config split:
+#   values.yaml.gotmpl → topology, replicas, resources, gateway/ingress
+#   config.yaml.gotmpl → mimir.structuredConfig (limits, blocks_storage, ruler)
+#   Secret (SOPS)      → S3 access/secret keys via extraEnvFrom (minio user)
+#
+# Why remote_write instead of federation: single global query view, tenant
+# limits, compaction, and retention decoupled from Prometheus local TSDB.
+# ============================================================
+
+fullnameOverride: mimir
+
+# ── S3 credentials (SOPS) injected as env, referenced by structuredConfig ──
+global:
+  extraEnv:
+    - name: AWS_ACCESS_KEY_ID
+      value: mimir
+    - name: AWS_SECRET_ACCESS_KEY
+      value: {{ .Values.secrets.minio.mimirSecretKey | quote }}
+
+# ── Common per-component storage class ──────────────────────
+mimir:
+  # structuredConfig is provided by config.yaml.gotmpl (merged by the release).
+  # Kept empty here so the two files don't fight over the same key.
+  structuredConfig: {}
+# Disable microservice components in monolithic mode (chart handles most, but
+# be explicit about the heavy stateful ones for non-prod cost).
+
+# ── Distributed (prod) — per-component sizing ───────────────
+
+# ── Gateway (Prometheus remote_write + Grafana read target) ──
+# nginx front-door: http://mimir-gateway.observability.svc/api/v1/push
+# Disable microservice components in monolithic mode (chart handles most, but
+# be explicit about the heavy stateful ones for non-prod cost).
+# ── Distributed (prod) — per-component sizing ───────────────
+# ── Gateway (Prometheus remote_write + Grafana read target) ──
+# nginx front-door: http://mimir-gateway.observability.svc/api/v1/push
+gateway:
+  enabledNonEnterprise: true
+  ingress:
+    enabled: false                    # keep internal; expose via Grafana only
+  replicas: 1
+
+# ── Bundled dependencies OFF (we bring our own) ─────────────
+minio:
+  enabled: false                      # use the shared release/minio release
+metaMonitoring:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+  grafanaAgent:
+    enabled: false                    # we already run Alloy/otel-collector
+# deploymentMode: monolithic collapses all targets into one Deployment for
+# non-prod; distributed splits ingester/querier/etc. for prod scale.
+deploymentMode: monolithic
+
+# ── Monolithic (dev/staging) ────────────────────────────────
+monolithic:
+  replicas: 1
+  resources:
+    requests: { cpu: 300m, memory: 1Gi }
+    limits:   { cpu: 1, memory: 2Gi }
+  persistentVolume:
+    enabled: true
+    size: 20Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+
+# Rollout smoothing for stateful components on upgrade.
+rollout_operator:
+  enabled: false

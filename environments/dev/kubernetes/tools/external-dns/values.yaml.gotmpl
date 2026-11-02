@@ -1,0 +1,76 @@
+# ============================================================
+# ExternalDNS — sync Ingress/Service hostnames → cloud DNS
+# Chart: external-dns/external-dns · ns `infra`
+#
+# Watches Ingress + Service objects and creates/updates DNS records in the
+# provider (AWS Route53 by default) so `*.{{ "{{env}}" }}.example.com` resolves
+# without manual record management. Pairs with cert-manager DNS-01.
+#
+# Ownership safety:
+#   txtOwnerId + TXT registry → ExternalDNS only ever touches records IT
+#   created; never deletes foreign records. One unique owner id per cluster/env.
+#
+# Auth: prefer IRSA (annotate SA) over static keys — no secret needed.
+#
+# What lives where:
+#   values.yaml.gotmpl → provider, filters, policy, ownerId, IRSA SA
+#   Secret             → only if NOT using IRSA (static provider creds via SOPS)
+#   config/            → n/a
+# ============================================================
+
+provider:
+  name: aws
+
+# Restrict to this env's zone so dev/staging/prod never fight over records.
+domainFilters:
+  - {{ .Values.ingressDomain | quote }}
+
+# ── Ownership / safety ──────────────────────────────────────
+policy: sync                           # create + update + delete owned records
+registry: txt
+txtPrefix: "_extdns-"
+
+sources:
+  - ingress
+  - service
+
+# Only act on annotated resources → avoids accidental record sprawl.
+# (external-dns.alpha.kubernetes.io/hostname on the Ingress/Service.)
+managedRecordTypes:
+  - A
+  - AAAA
+  - CNAME
+
+interval: 1m
+triggerLoopOnEvent: true
+
+# ── IRSA (preferred) — no static keys ───────────────────────
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::{{ requiredEnv "AWS_ACCOUNT_ID" }}:role/{{ .Values.eksClusterName }}-irsa-external-dns
+
+# ── Hardening ───────────────────────────────────────────────
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  fsGroup: 65534
+  seccompProfile: { type: RuntimeDefault }
+  capabilities: { drop: [ ALL ] }
+  readOnlyRootFilesystem: true
+
+resources:
+  requests: { cpu: 50m,  memory: 64Mi }
+  limits:   { cpu: 200m, memory: 128Mi }
+
+# ── Metrics ─────────────────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+logFormat: json
+txtOwnerId: "k8s-dev"
+
+replicaCount: 1
+
+logLevel: debug

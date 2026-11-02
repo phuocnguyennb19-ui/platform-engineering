@@ -1,0 +1,56 @@
+# ============================================================
+# Mimir — structuredConfig (limits / blocks_storage / ruler)
+# Merged into the release on top of values.yaml.gotmpl (topology).
+#
+# object_store = MinIO (S3 API). Credentials come from AWS_* env injected in
+# values.yaml.gotmpl (global.extraEnv, from SOPS minio.mimirSecretKey).
+# ============================================================   {{/* 7d / 14d / 365d */}}
+
+mimir:
+  structuredConfig:
+    multitenancy_enabled: false        # single-tenant; front with authproxy if multi-tenant
+
+    common:
+      storage:
+        backend: s3
+        s3:
+          endpoint: {{ (printf "minio.%s.svc.%s:9000" "database" .Values.clusterDomain) }}
+          bucket_name: mimir-blocks
+          insecure: true               # in-cluster MinIO over http; TLS via mesh if required
+          access_key_id: ${AWS_ACCESS_KEY_ID}
+          secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+
+    blocks_storage:
+      backend: s3
+      s3:
+        bucket_name: mimir-blocks
+      tsdb:
+        retention_period: 24h          # local TSDB before shipping to object store
+
+    limits:
+      max_label_names_per_series: 30
+      out_of_order_time_window: 10m
+      # Retention of shipped blocks in object store (compactor enforces).
+      compactor_blocks_retention_period: 8760h
+      # Ingestion guardrails (tune per fleet size).
+      ingestion_rate: 100000
+      ingestion_burst_size: 200000
+      max_global_series_per_user: 5000000
+      max_query_lookback: 8760h
+
+    ruler_storage:
+      backend: s3
+      s3:
+        bucket_name: mimir-ruler
+
+    alertmanager_storage:
+      backend: s3
+      s3:
+        bucket_name: mimir-alerts
+
+    ruler:
+      # Send Mimir-evaluated alerts to the shared Alertmanager (kube-prom-stack).
+      alertmanager_url: http://kube-prometheus-stack-alertmanager.{{ .Values.namespace }}.svc.{{ .Values.clusterDomain }}:9093
+
+    compactor:
+      compaction_interval: 30m

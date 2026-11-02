@@ -1,0 +1,32 @@
+# Kyverno — policy admission controller
+
+# Kyverno CRDs (ClusterPolicy, Policy...).
+crds:
+  install: true
+
+# The admission controller needs >=3 replicas for HA in prod (it's on the request path).
+# The admission controller needs >=3 replicas for HA in prod (it's on the request path).
+admissionController:
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  serviceMonitor:
+    enabled: true
+  replicas: 1
+
+backgroundController:
+  serviceMonitor:
+    enabled: true
+  replicas: 1
+
+reportsController:
+  serviceMonitor:
+    enabled: true
+  replicas: 1
+
+cleanupController:
+  serviceMonitor:
+    enabled: true
+  replicas: 1
+
+# Sample policies: kyverno/manifests/policies.yaml (apply after Kyverno is Ready).

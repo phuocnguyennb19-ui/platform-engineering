@@ -1,0 +1,261 @@
+# ============================================================
+# MONITORING TIER — workload-scoped policies, namespace `observability`
+#
+# Every policy here selects ONE workload by label. The namespace-wide
+# default-deny lives in 00-baseline.yaml; nothing in this file uses
+# `podSelector: {}`, so no rule can leak access to a neighbouring workload.
+#
+# ── Labels are verified against running pods, not guessed ──
+#   prometheus            app.kubernetes.io/name: prometheus
+#   alertmanager          app.kubernetes.io/name: alertmanager
+#   grafana               app.kubernetes.io/name: grafana
+#   kube-state-metrics    app.kubernetes.io/name: kube-state-metrics
+#   node-exporter         app.kubernetes.io/name: prometheus-node-exporter
+#   operator              app.kubernetes.io/component: prometheus-operator
+# Re-verify after any chart bump:
+#   kubectl -n observability get pods --show-labels
+#
+# ⚠ NOT COVERED HERE: loki · tempo · mimir · alloy · otel-collector ·
+#   opensearch. They have no ingress rule, so under the baseline default-deny
+#   NOTHING can reach them — including Grafana. They are reachable today only
+#   because `allow-intra-namespace` below admits the whole namespace to them.
+#   Give each one a scoped rule before removing that.
+# ============================================================
+
+# ── Shared: intra-namespace ─────────────────────────────────
+# ⚠ THE ONE DELIBERATE `podSelector: {}` IN THIS FILE, and the reason the
+#   tier still works: Grafana → Loki/Tempo/OpenSearch, Prometheus → every
+#   in-namespace target, Alloy → Loki, OTel → Tempo. Replacing it with
+#   per-workload rules is the next step of the migration, not this one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: observability
+  labels: { managed-by: platform, migration: pending-workload-split }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+# ── prometheus ──────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-prometheus
+  namespace: observability
+  labels: { workload: prometheus }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes: [Ingress]
+  ingress:
+    # Grafana queries it; Kong (ns infra) would serve the UI (ingress disabled today,
+    # so this covers port-forward-free access if it is ever enabled).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+      ports:
+        - { protocol: TCP, port: 9090 }
+    # Tempo's metrics-generator remote_writes RED metrics here
+    # (prometheus.yaml.gotmpl → enableRemoteWriteReceiver: true).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+# ── alertmanager ────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-alertmanager
+  namespace: observability
+  labels: { workload: alertmanager }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+        # falcosidekick posts runtime-security alerts (falco/values.yaml.gotmpl).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: falco
+      ports:
+        - { protocol: TCP, port: 9093 }
+  egress:
+    # Notification receivers live on the public internet (Slack, PagerDuty,
+    # SMTP). The baseline denies public egress, so it must be re-granted here
+    # or every alert silently fails to deliver.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254/32]
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 587 }   # SMTP submission
+---
+# ── grafana ─────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-grafana
+  namespace: observability
+  labels: { workload: grafana }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The ingress controller (Kong; ingress-nginx until its cutover) runs in ns `infra`.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+      ports:
+        - { protocol: TCP, port: 3000 }
+  egress:
+    # Plugin downloads at startup (GF_INSTALL_PLUGINS is set on the container —
+    # the OpenSearch datasource plugin comes from grafana.com). Without this the
+    # pod starts but the plugin install step hangs, then the datasource errors.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254/32]
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# ── kube-state-metrics ──────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-kube-state-metrics
+  namespace: observability
+  labels: { workload: kube-state-metrics }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  policyTypes: [Ingress]
+  ingress:
+    # Scraped only from inside the namespace; covered by allow-intra-namespace
+    # today. Listed explicitly so it survives that rule's removal.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# ── prometheus-operator (admission webhook) ─────────────────
+# ⚠ LOAD-BEARING at staging/prod, where admissionWebhooks is enabled
+#   (disabled at dev — kube-prometheus-stack/values.yaml.gotmpl).
+#   The API server calls :10250 and is NOT a pod, so no selector can match it.
+#   Under default-deny the call times out and every create/update of a
+#   Prometheus / ServiceMonitor / PrometheusRule fails.
+# Scoped to RFC1918 rather than 0.0.0.0/0: a Kubernetes control plane always
+# reaches nodes from a private address — in-VPC on EKS/GKE/AKS, the node IP on
+# minikube/kubeadm. This keeps the webhook unreachable from the public
+# internet while staying portable across clusters.
+# 🔧 PROD: narrow further to the actual control-plane address:
+#      kubectl get endpoints kubernetes -n default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-prometheus-operator
+  namespace: observability
+  labels: { workload: prometheus-operator }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: prometheus-operator
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 172.16.0.0/12 }
+        - ipBlock: { cidr: 192.168.0.0/16 }
+      ports:
+        - { protocol: TCP, port: 10250 }
+---
+# ── node-exporter ───────────────────────────────────────────
+# ⚠ THIS RULE IS A NO-OP ON MOST CNIs — kept for documentation and for CNIs
+#   that do police host-network pods (Cilium). node-exporter runs
+#   hostNetwork: true, so Prometheus scrapes <nodeIP>:9100 and Calico does not
+#   apply pod policy to host-network traffic. The scrape works because it
+#   bypasses policy entirely.
+#   The rule that ACTUALLY matters for this flow is the RFC1918 egress block in
+#   00-baseline.yaml, which lets Prometheus reach the node address at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-node-exporter
+  namespace: observability
+  labels: { workload: node-exporter }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - { protocol: TCP, port: 9100 }
+---
+# ── otel-collector: application telemetry ───────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-opentelemetry-collector
+  namespace: observability
+  labels: { workload: opentelemetry-collector }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opentelemetry-collector
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [dev, staging, prod]
+      ports:
+        - { protocol: TCP, port: 4317 }   # OTLP gRPC
+        - { protocol: TCP, port: 4318 }   # OTLP HTTP
+---
+# ── loki: falco alert ingestion ─────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-loki-gateway
+  namespace: observability
+  labels: { workload: loki }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: falco
+      ports:
+        - { protocol: TCP, port: 80 }

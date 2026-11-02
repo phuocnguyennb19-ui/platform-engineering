@@ -7,13 +7,13 @@ app đọc chúng để biết mình được cấp gì. Đổi ở đây ảnh 
 
 | | dev | staging | production |
 |---|---|---|---|
-| Terraform (`ENVIRONMENT`, `infra-base/terraform/environments/<env>/`, `applications/<app>/terraform/<env>.yaml`) | `dev` | `staging` | `production` |
-| Helm / Argo (`helmfile -e`, `DEPLOY_ENV`, `infra-base/k8s/env-values/<env>/`, namespace, `applications/<app>/k8s/<env>/`) | `dev` | `staging` | `prod` |
+| Terraform (`ENVIRONMENT`, `environments/<env>/terraform/`, `applications/<app>/terraform/<env>.yaml`) | `dev` | `staging` | `production` |
+| Helm / Argo (`helmfile -e`, `DEPLOY_ENV`, `environments/<env>/kubernetes/`, namespace, `applications/<app>/k8s/<env>/`) | `dev` | `staging` | `prod` |
 | EKS cluster | `platform-dev-eks` | `platform-staging-eks` | `platform-production-eks` |
 | ECS cluster | `platform-dev-ecs` | `platform-staging-ecs` | `platform-production-ecs` |
 | Branch của repo app (`ci/deploy-template.gitlab-ci.yml`) | `dev`, `develop`, `feature/*` | `staging`, `release/*` | `main`, `master` (manual) |
 
-## Terraform — `infra-base/terraform/environments/<env>/`
+## Terraform — `environments/<env>/terraform/`
 
 | File | Key chính | Chi tiết |
 |---|---|---|
@@ -33,7 +33,7 @@ Trạng thái hiện tại (đọc từ các file trên):
 | Tag image deploy | `IMAGE_TAG` của pipeline | tag ghim trong `staging.yaml` | tag ghim trong `production.yaml` |
 | Promote image từ | — | dev | staging |
 
-## Kubernetes — `infra-base/k8s/env-values/`
+## Kubernetes — `environments/<env>/kubernetes/`
 
 | File | Ai đọc | Chứa |
 |---|---|---|
@@ -58,4 +58,4 @@ App-values theo tier (tóm tắt; nguồn là file):
 | NetworkPolicy ingress | từ `infra` (ingress-nginx) + cùng namespace | + `observability` (scrape 9090), cổng 8080/9090 | như staging |
 | NetworkPolicy egress | không giới hạn | DNS, API server 443, `database` (5432, 6379, 9092, 9000), OTLP (4317/4318), HTTPS ra ngoài | như staging + 26379 (redis sentinel) |
 
-Thứ tự các lớp này ghép với value của app: [`../app-onboarding.md`](../app-onboarding.md#value-nào-đã-có-sẵn).
+Thứ tự các lớp này ghép với value của app: [`../app-onboarding.md`](../10-onboard-app.md#value-nào-đã-có-sẵn).

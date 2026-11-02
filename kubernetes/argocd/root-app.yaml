@@ -1,0 +1,54 @@
+# ============================================================
+# App-of-Apps ROOT — apply ONCE, then argocd manages the rest from git.
+#   kubectl apply -f kubernetes/argocd/root-app.yaml
+#
+# It syncs the bootstrap/ dir (AppProject + ApplicationSet). The ApplicationSet
+# then generates one Application per app-tier service under *.
+#
+# The root app runs in its own AppProject "bootstrap", applied together with it (same file),
+# so it never uses the wildcard `default` project: it may only create the AppProject and the
+# ApplicationSet in the Argo CD namespace — no cluster-scoped kind, no other namespace.
+#
+# Repo: gitlab.com/myorg/helm-project-v3 @ main (already filled in).
+# ============================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bootstrap
+  namespace: infra                      # namespace where argocd runs
+spec:
+  description: Root App-of-Apps only — syncs kubernetes/argocd/bootstrap
+  sourceRepos:
+    - https://gitlab.com/myorg/helm-project-v3.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: infra
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - { group: argoproj.io, kind: AppProject }
+    - { group: argoproj.io, kind: ApplicationSet }
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-bootstrap
+  namespace: infra                      # namespace where argocd runs
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: bootstrap
+  source:
+    repoURL: https://gitlab.com/myorg/helm-project-v3.git
+    targetRevision: main
+    path: kubernetes/argocd/bootstrap
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: infra
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ApplyOutOfSyncOnly=true

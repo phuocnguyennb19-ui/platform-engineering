@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "title": "application chart values — partial file (generated: docs/tools/gen-chart-reference.sh)",
-  "description": "Typo in a key name is the most expensive class of bug in a values-driven chart: helmfile's missingFileHandler=Warn plus Helm's tolerance for unknown keys means a misspelled knob deploys silently with the default. This schema turns that into a failed render.",
+  "title": "application chart values — partial file (generated: scripts/docs/gen-chart-reference.sh)",
+  "description": "Typo in a key name is the most expensive class of bug in a values-driven chart: Helm's tolerance for unknown keys means a misspelled knob deploys silently with the default. This schema turns that into a failed render.",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "definitions": {
     "quantity": {
       "type": [
@@ -628,6 +628,33 @@
               "DoNotSchedule",
               "ScheduleAnyway"
             ]
+          },
+          "minDomains": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nodeAffinityPolicy": {
+            "type": "string",
+            "enum": [
+              "Honor",
+              "Ignore"
+            ]
+          },
+          "nodeTaintsPolicy": {
+            "type": "string",
+            "enum": [
+              "Honor",
+              "Ignore"
+            ]
+          },
+          "matchLabelKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "labelSelector": {
+            "type": "object"
           }
         }
       }
@@ -744,6 +771,185 @@
       "type": "array",
       "items": {
         "type": "object"
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "description": "Opt-in nginx reverse-proxy sidecar in the app pod. Enabled: Service targetPort `http` = nginx proxy.port → 127.0.0.1:proxy.upstreamPort (app).",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "registry": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": [
+                "string",
+                "number"
+              ],
+              "not": {
+                "const": "latest"
+              }
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^$|^sha256:[a-f0-9]{64}$"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          }
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "upstreamPort": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "healthPath": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "clientMaxBodySize": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+[kKmMgG]?$"
+        },
+        "timeouts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connect": {
+              "type": "string",
+              "pattern": "^[0-9]+(ms|s|m)?$"
+            },
+            "send": {
+              "type": "string",
+              "pattern": "^[0-9]+(ms|s|m)?$"
+            },
+            "read": {
+              "type": "string",
+              "pattern": "^[0-9]+(ms|s|m)?$"
+            }
+          }
+        },
+        "upstreamKeepalive": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connections": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "timeout": {
+              "type": "string",
+              "pattern": "^[0-9]+(ms|s|m)?$"
+            }
+          }
+        },
+        "realIpFrom": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workerProcesses": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "pattern": "^(auto|[0-9]+)$"
+        },
+        "workerConnections": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "accessLog": {
+          "type": "boolean"
+        },
+        "errorLogLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "notice",
+            "warn",
+            "error",
+            "crit",
+            "alert",
+            "emerg"
+          ]
+        },
+        "httpSnippet": {
+          "type": "string"
+        },
+        "serverSnippet": {
+          "type": "string"
+        },
+        "config": {
+          "type": "string"
+        },
+        "tmpSizeLimit": {
+          "$ref": "#/definitions/quantity"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "securityContext": {
+          "type": "object"
+        },
+        "shutdown": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "drainSeconds": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "appPreStopSleepSeconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "upstreamPort": {
+            "type": "integer"
+          }
+        }
       }
     },
     "workers": {

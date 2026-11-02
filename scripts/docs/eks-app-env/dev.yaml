@@ -1,0 +1,15 @@
+# Phần riêng của môi trường dev, gộp vào scripts/docs/eks-app-values.base.yaml bởi
+# scripts/docs/gen-app-template.sh → applications/_template/k8s/dev/values.yaml.
+image:
+  tag: "REPLACE_WITH_IMAGE_TAG"
+ingress:
+  enabled: true
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+  hosts:
+    - host: __APP__.dev.example.com
+      paths:
+        - {path: /, pathType: Prefix}
+  tls:
+    - secretName: __APP__-tls
+      hosts: ["__APP__.dev.example.com"]

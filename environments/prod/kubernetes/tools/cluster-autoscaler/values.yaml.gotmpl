@@ -1,0 +1,64 @@
+# ============================================================
+# Cluster Autoscaler — scale node groups on pending pods (AWS ASG)
+# Chart: autoscaler/cluster-autoscaler · ns `kube-system`
+#
+# ⚠ MUTUALLY EXCLUSIVE with Karpenter — never both on the same nodes.
+#   Which one runs is nodeAutoscaler in environments/<env>/kubernetes/state.yaml
+#   (cluster-autoscaler today: the IRSA role and node-group tags already exist in
+#   terraform/stacks/core; Karpenter still needs its core resources).
+#
+# What lives where:
+#   values.yaml.gotmpl → provider, ASG autodiscovery, scale policy, IRSA SA
+#   Secret             → only for static cloud creds (prefer IRSA → none)
+#   config/            → n/a
+# ============================================================
+
+cloudProvider: aws
+awsRegion: ap-southeast-1
+
+# Discover ASGs tagged for this cluster/env (no hardcoded group names).
+autoDiscovery:
+  clusterName: {{ .Values.eksClusterName }}
+  tags:
+    - k8s.io/cluster-autoscaler/enabled
+    - k8s.io/cluster-autoscaler/{{ .Values.eksClusterName }}
+
+extraArgs:
+  balance-similar-node-groups: true
+  skip-nodes-with-system-pods: false
+  skip-nodes-with-local-storage: false
+  expander: least-waste
+  scale-down-enabled: true
+  scale-down-utilization-threshold: "0.5"
+  scale-down-unneeded-time: 10m
+
+# ── IRSA (preferred) ────────────────────────────────────────
+rbac:
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::{{ requiredEnv "AWS_ACCOUNT_ID" }}:role/{{ .Values.eksClusterName }}-irsa-cluster-autoscaler
+podDisruptionBudget:
+  maxUnavailable: 1
+priorityClassName: system-cluster-critical
+
+resources:
+  requests: { cpu: 100m, memory: 300Mi }
+  limits:   { cpu: 500m, memory: 500Mi }
+
+# ── Hardening ───────────────────────────────────────────────
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  seccompProfile: { type: RuntimeDefault }
+  capabilities: { drop: [ ALL ] }
+
+# ── Metrics ─────────────────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  namespace: kube-system
+  selector:
+    release: kube-prometheus-stack
+
+# ── Availability ────────────────────────────────────────────
+replicaCount: 2

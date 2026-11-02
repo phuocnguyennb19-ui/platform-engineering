@@ -1,0 +1,255 @@
+# ============================================================
+# Kyverno baseline ClusterPolicies — apply AFTER Kyverno is Ready:
+#   kubectl apply -f kyverno/manifests/policies.yaml
+#
+# Kyverno 1.13+ API: `validate.failureAction` PER-RULE
+# (spec.validationFailureAction was removed).
+#
+# ── WHY EVERYTHING STARTS AT Audit ──────────────────────────────────────────
+# These rules match kind: Pod. Enforced cluster-wide against the platform as it
+# actually renders today, they block the platform from installing:
+#
+#   require-readonly-rootfs   21 containers  grafana, ingress-nginx, vault,
+#                                            falco, tempo, minio, alloy,
+#                                            opensearch, reloader …
+#   require-requests-limits   35 containers  the whole mimir stack, loki-canary,
+#                                            node-exporter, kube-state-metrics
+#   disallow-latest-tag        7 containers  incl. ghcr.io/kyverno/readiness-
+#                                            checker:latest — Kyverno's OWN pod
+#   disallow-privileged        4 DaemonSets  falco, velero node-agent,
+#                                            trivy node-collector, node-exporter
+#
+# Upstream charts own those pod specs; we cannot fix them from here. So:
+#   1. Roll out at Audit. Read the PolicyReports:
+#        kubectl get polr -A
+#        kubectl get cpolr
+#   2. Fix what is ours (app-tier values already comply).
+#   3. Promote per policy to Enforce, starting with the app namespaces.
+#
+# ── EXCLUSIONS ──────────────────────────────────────────────────────────────
+# Every policy excludes the platform namespaces whose workloads come from
+# upstream charts. Kyverno's own resourceFilters already skip kube-system and
+# the kyverno namespace, but ClusterPolicy `exclude` is explicit and survives a
+# resourceFilters change.
+#
+# ⚠ The exclusion list is repeated verbatim in each policy ON PURPOSE. YAML
+#   anchors (&name / *name) are scoped to a single document and do NOT cross
+#   `---`, so an anchor declared in the first policy is an unresolved alias in
+#   the rest — kubectl would reject the file. Keep the five lists in sync.
+# ============================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow :latest image tag
+    policies.kyverno.io/severity: medium
+spec:
+  background: true
+  rules:
+    - name: require-image-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+                - infra
+                - observability
+                - database
+                - vault
+                - harbor
+                - falco
+                - velero
+                - trivy-system
+                - keda
+      validate:
+        # Audit: upstream charts still ship :latest (kyverno readiness-checker,
+        # opensearch busybox init, minio appropriate/curl).
+        failureAction: Audit
+        message: "Image must use a specific tag, not :latest."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-requests-limits
+  annotations:
+    policies.kyverno.io/title: Require resource requests and limits
+    policies.kyverno.io/severity: medium
+spec:
+  background: true
+  rules:
+    - name: require-resources
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+                - infra
+                - observability
+                - database
+                - vault
+                - harbor
+                - falco
+                - velero
+                - trivy-system
+                - keda
+      validate:
+        failureAction: Audit
+        message: "Container must declare resources.requests and resources.limits."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    # CPU limits are intentionally NOT required: they cause
+                    # throttling on latency-sensitive services. Memory limits
+                    # are, because memory is not compressible.
+                    memory: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged
+  annotations:
+    policies.kyverno.io/title: Disallow privileged / privilege escalation
+    policies.kyverno.io/severity: high
+spec:
+  background: true
+  rules:
+    - name: no-privileged
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          # Node-level agents legitimately need privileged + hostPath: falco
+          # (eBPF), velero node-agent (Kopia), trivy node-collector,
+          # node-exporter. Their namespaces are PSA=privileged for the same
+          # reason (environments/<env>/kubernetes/namespace/namespaces.yaml).
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+                - infra
+                - observability
+                - database
+                - vault
+                - harbor
+                - falco
+                - velero
+                - trivy-system
+                - keda
+      validate:
+        failureAction: Audit
+        message: "privileged / allowPrivilegeEscalation is not allowed."
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): "true"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+                  =(allowPrivilegeEscalation): "false"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-readonly-rootfs
+  annotations:
+    policies.kyverno.io/title: Require read-only root filesystem
+    policies.kyverno.io/severity: medium
+spec:
+  background: true
+  rules:
+    - name: readonly-rootfs
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+                - infra
+                - observability
+                - database
+                - vault
+                - harbor
+                - falco
+                - velero
+                - trivy-system
+                - keda
+      validate:
+        failureAction: Audit
+        message: "Container must set securityContext.readOnlyRootFilesystem=true."
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  readOnlyRootFilesystem: true
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: pod-security-restricted
+  annotations:
+    policies.kyverno.io/title: Enforce Pod Security Standard - restricted
+    policies.kyverno.io/severity: high
+spec:
+  background: true
+  rules:
+    - name: restricted
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+                - infra
+                - observability
+                - database
+                - vault
+                - harbor
+                - falco
+                - velero
+                - trivy-system
+                - keda
+      validate:
+        failureAction: Audit
+        podSecurity:
+          level: restricted
+          version: latest

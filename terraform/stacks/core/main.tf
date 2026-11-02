@@ -1,7 +1,7 @@
 module "config" {
   source = "../../shared/config"
 
-  config_root       = "${path.root}/../../../infra-base/terraform"
+  config_root       = "${path.root}/../../../environments"
   applications_root = "${path.root}/../../../applications"
   environment       = var.environment
 }
@@ -32,14 +32,14 @@ locals {
   }
 
   core_errors = concat(
-    can(cidrhost(local.core.vpc.cidr, 0)) ? [] : ["infra-base/terraform/environments/${var.environment}/core.yaml: vpc.cidr must be a CIDR block"],
-    !local.alb_enabled || local.dns_enabled || local.alb_internal ? [] : ["infra-base/terraform/environments/${var.environment}/core.yaml: a public alb needs dns for its certificate, or set alb.internal"],
-    local.alb_target_ports.from <= local.alb_target_ports.to ? [] : ["infra-base/terraform/environments/${var.environment}/core.yaml: alb.target_port_range.from must not exceed to"],
-    [for k in keys(local.addon_roles) : "infra-base/terraform/environments/${var.environment}/core.yaml: eks.addon_roles.${k} has no policy; known: ${join(", ", keys(local.addon_policies))}" if !contains(keys(local.addon_policies), k)],
-    [for k, r in local.addon_roles : "infra-base/terraform/environments/${var.environment}/core.yaml: eks.addon_roles.${k}.service_accounts must list namespace:serviceaccount entries" if length(r.service_accounts) == 0 || !alltrue([for sa in r.service_accounts : can(regex("^[a-z0-9-]+:[a-z0-9-]+$", sa))])],
+    can(cidrhost(local.core.vpc.cidr, 0)) ? [] : ["${module.config.env_path}/core.yaml: vpc.cidr must be a CIDR block"],
+    !local.alb_enabled || local.dns_enabled || local.alb_internal ? [] : ["${module.config.env_path}/core.yaml: a public alb needs dns for its certificate, or set alb.internal"],
+    local.alb_target_ports.from <= local.alb_target_ports.to ? [] : ["${module.config.env_path}/core.yaml: alb.target_port_range.from must not exceed to"],
+    [for k in keys(local.addon_roles) : "${module.config.env_path}/core.yaml: eks.addon_roles.${k} has no policy; known: ${join(", ", keys(local.addon_policies))}" if !contains(keys(local.addon_policies), k)],
+    [for k, r in local.addon_roles : "${module.config.env_path}/core.yaml: eks.addon_roles.${k}.service_accounts must list namespace:serviceaccount entries" if length(r.service_accounts) == 0 || !alltrue([for sa in r.service_accounts : can(regex("^[a-z0-9-]+:[a-z0-9-]+$", sa))])],
   )
 
-  # IAM for cluster add-ons installed from k8s/platform; policies follow each project's documented minimum.
+  # IAM for cluster add-ons installed from kubernetes/platform; policies follow each project's documented minimum.
   addon_roles = {
     for k, r in try(local.core.eks.addon_roles, {}) : k => {
       service_accounts = try(tolist(r.service_accounts), [])
@@ -173,7 +173,7 @@ module "eks" {
   cluster_log_retention_days     = try(local.core.logs.retention_days, 90)
   access_entries                 = try(local.core.eks.access_entries, {})
 
-  # Role names are <cluster>-irsa-<key>; k8s/env-values builds the same ARN from the account ID.
+  # Role names are <cluster>-irsa-<key>; environments/<env>/kubernetes (tool values) builds the same ARN from the account ID.
   irsa_roles = {
     for k, r in local.addon_roles : k => {
       description                = "${k} add-on (helm-project), ${local.eks_cluster_name}"
@@ -185,7 +185,7 @@ module "eks" {
   tags = local.tags
 }
 
-# SOPS data key for k8s/env-values secrets; the deploy role decrypts with kms:Decrypt.
+# SOPS data key for environments/<env>/kubernetes/secrets.enc.yaml; the deploy role decrypts with kms:Decrypt.
 module "sops_kms" {
   source = "../../modules/kms"
   count  = try(local.core.sops.kms_key, false) == true ? 1 : 0

@@ -1,0 +1,17 @@
+{{- /*
+Kong's cluster-wide plugins, rendered INTO the kong release (chart key extraObjects) instead of
+a separate `kubectl apply`. Ingresses reference these plugins (konghq.com/plugins:
+request-size-limit); a plugin that does not exist yet makes the controller reject those routes,
+so the plugins must land in the same sync as Kong itself. The chart installs its CRDs
+(KongClusterPlugin) from crds/ before any template, so one release is enough.
+
+Source of truth stays manifests/plugins.yaml (env-agnostic, one document per plugin);
+this file only wraps it. Not an environment value file: nothing here differs per env.
+*/ -}}
+extraObjects:
+{{- range $doc := regexSplit "(?m)^---[ \t]*$" (readFile "manifests/plugins.yaml") -1 }}
+{{-   $o := $doc | fromYaml }}
+{{-   if and $o (hasKey $o "kind") }}
+  - {{- $o | toYaml | nindent 4 }}
+{{-   end }}
+{{- end }}

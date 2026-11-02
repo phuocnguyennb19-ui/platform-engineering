@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "environments/<env>/kubernetes/cluster/<name>.yaml",
+  "description": "Cluster metadata (kubernetes-environment/v1alpha1). Describes a cluster; provisions nothing. Cross-file rules (name = file name, environment file exists, provisioning.source exists, PSA matches the namespace manifest) live in scripts/check-metadata.sh.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "name",
+    "provider",
+    "environment",
+    "context",
+    "provisioning",
+    "delivery",
+    "capabilities"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kubernetes-environment/v1alpha1"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,52}$"
+    },
+    "provider": {
+      "enum": [
+        "docker-desktop",
+        "k3s",
+        "self-managed",
+        "eks"
+      ]
+    },
+    "environment": {
+      "enum": [
+        "dev",
+        "staging",
+        "production"
+      ]
+    },
+    "context": {
+      "description": "kubeconfig context NAME, or an unreplaced <placeholder>. Never kubeconfig contents, never an ARN.",
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^arn:|[0-9]{12}"
+      }
+    },
+    "provisioning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "source"
+      ],
+      "properties": {
+        "method": {
+          "enum": [
+            "docker-desktop",
+            "k3s-installer",
+            "manual",
+            "terraform"
+          ],
+          "description": "How the cluster comes to exist. Only terraform is automated in this repository (terraform/stacks/core); the others are documented in providers/<provider>/README.md."
+        },
+        "source": {
+          "description": "Repository path that creates or documents creating the cluster.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "ciDeployAllowed"
+      ],
+      "properties": {
+        "owner": {
+          "enum": [
+            "argocd",
+            "helmfile",
+            "ci"
+          ],
+          "description": "Default owner that applies releases on this cluster (single-owner rule)."
+        },
+        "ciDeployAllowed": {
+          "type": "boolean",
+          "description": "Policy: may CI deploy to this cluster. check-metadata.sh rejects true for staging/production; no pipeline reads it."
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ingress",
+        "gatewayAPI",
+        "prometheusOperator",
+        "persistentStorage"
+      ],
+      "properties": {
+        "ingress": {
+          "$ref": "#/$defs/capability"
+        },
+        "gatewayAPI": {
+          "$ref": "#/$defs/capability"
+        },
+        "prometheusOperator": {
+          "$ref": "#/$defs/capability"
+        },
+        "persistentStorage": {
+          "$ref": "#/$defs/capability"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "verified"
+      ],
+      "properties": {
+        "expected": {
+          "enum": [
+            "required",
+            "optional",
+            "not-used"
+          ],
+          "description": "What workloads on this cluster rely on. preflight --cluster checks required/optional ones live: required → FAIL when absent or unverifiable, optional → WARN/UNKNOWN, not-used → not evaluated."
+        },
+        "requires": {
+          "description": "api: the API types must exist (IngressClass, CRDs, default StorageClass). controller (default): the API AND a running controller acting on it.",
+          "enum": [
+            "api",
+            "controller"
+          ]
+        },
+        "verified": {
+          "description": "A past record, never the current state.",
+          "enum": [
+            "unknown",
+            "present",
+            "absent"
+          ]
+        },
+        "verifiedOn": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "verifiedBy": {
+          "enum": [
+            "preflight",
+            "manual"
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "verified": {
+            "enum": [
+              "present",
+              "absent"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "verifiedOn",
+          "verifiedBy"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "verifiedOn"
+              ]
+            },
+            {
+              "required": [
+                "verifiedBy"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "environment": {
+            "enum": [
+              "staging",
+              "production"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "delivery": {
+            "properties": {
+              "ciDeployAllowed": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

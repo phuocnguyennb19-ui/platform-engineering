@@ -1,0 +1,39 @@
+# proxy sidecar: Ingress (kong) → Service :80 → `http` = nginx :8080 → 127.0.0.1:3000 (app).
+# Also proves: app probes on `port: http` are rewritten to `app`, NetworkPolicy allows 8080,
+# the app preStop becomes the proxy hold, and the worker gets no sidecar.
+global: { imageRegistry: harbor.ci.example.com }
+image: { repository: myapp, tag: "1.2.3" }
+service: { port: 80, targetPort: 8080 }
+extraPorts:
+  - { name: metrics, containerPort: 9090, protocol: TCP }
+probes:
+  startup:   { httpGet: { path: /readyz, port: http }, failureThreshold: 30, periodSeconds: 2 }
+  readiness: { httpGet: { path: /readyz, port: http } }
+  liveness:  { tcpSocket: { port: http } }
+lifecycle:
+  preStop: { sleep: { seconds: 5 } }     # replaced by proxy.shutdown.appPreStopSleepSeconds
+terminationGracePeriodSeconds: 45
+extraVolumes: [ { name: tmp, emptyDir: { medium: Memory, sizeLimit: 32Mi } } ]
+extraVolumeMounts: [ { name: tmp, mountPath: /tmp } ]
+networkPolicy:
+  enabled: true
+  ingress: { enabled: true, fromIngressNamespace: infra }
+ingress:
+  enabled: true
+  className: kong
+  hosts: [ { host: app.example.com, paths: [ { path: /, pathType: Prefix } ] } ]
+proxy:
+  enabled: true
+  port: 8080
+  upstreamPort: 3000
+  clientMaxBodySize: 16m
+  timeouts: { connect: 3s, send: 30s, read: 120s }
+  realIpFrom: [10.0.0.0/8]
+  serverSnippet: |
+    location = /robots.txt { return 200 "User-agent: *\nDisallow: /\n"; }
+  shutdown: { drainSeconds: 5, appPreStopSleepSeconds: 20 }
+workers:
+  - name: consumer
+    enabled: true
+    command: ["./app"]
+    args: ["worker"]

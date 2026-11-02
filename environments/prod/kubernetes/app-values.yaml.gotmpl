@@ -1,0 +1,296 @@
+# ============================================================
+# Defaults for EVERY app release in the `prod` environment — layer 2 of 3:
+#   kubernetes/charts/application/values.yaml  →  THIS FILE  →  applications/<app>/k8s/prod/values.yaml
+# Complete for `prod`: no shared file across environments (docs/adr/0002). Order defined in
+# applications/helmfile.yaml.gotmpl, repeated in kubernetes/argocd/bootstrap/applicationset-apps.yaml.
+# Plain YAML despite the .gotmpl suffix — Argo CD reads it as-is. See docs/03-values-mapping.md.
+#
+# Chart: charts/application 2.x. The chart already ships hardened defaults via
+# `securityDefaults`; this file pins the platform-wide floor so a chart-version
+# bump can never silently relax it.
+# ============================================================
+
+# ============================================================
+# Common settings for PROD environment
+# Applied to all applications in production
+# ============================================================
+global:
+  # Empty here — each environment file MUST set the correct registry.
+  # Leaving this as a prod registry default would cause dev/staging to
+  # silently pull prod images when the env override file is missing.
+  # this environment's ECR (terraform/stacks/registry). Plain YAML because
+  # Argo CD reads this file too; deploy jobs refuse to run while REPLACE_WITH_ remains.
+  imageRegistry: "REPLACE_WITH_PRODUCTION_AWS_ACCOUNT_ID.dkr.ecr.ap-southeast-1.amazonaws.com"
+
+workload:
+  kind: Deployment
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+
+# ── Security ──────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  # Only flip to true for a service that genuinely calls the Kubernetes API.
+  automountServiceAccountToken: false
+
+# Hardened pod security context — services that need relaxed settings
+# must explicitly override per-key in their own values file.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# Default NetworkPolicy — ingress from the ingress controller, plus
+# same-namespace service-to-service calls.
+#
+# ⚠ allowSameNamespace must stay true unless the namespace is genuinely a single
+#   isolated service. Once an ingress rule carries a `from` list, ONLY those peers
+#   are allowed — same-namespace traffic is not implicit, so one app → another app in the namespace
+#   is dropped without it. Production and staging tighten egress on top of this.
+# ── Network Policy ────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  ingress:
+    enabled: true
+    # ⚠ REQUIRED. Once this rule carries a `from` list, ONLY those peers are
+    #   allowed — same-namespace traffic is NOT implicit. Without this every
+    #   in-cluster call between prod apps in the namespace is silently dropped
+    #   by the CNI.
+    #   environments/<env>/kubernetes/network/30-application.yaml now ships a namespace-wide
+    #   allow-intra-namespace that would compensate, but do NOT rely on it: it is
+    #   applied by kubectl at the end of a build, not by this release.
+    allowSameNamespace: true
+    fromIngressNamespace: "infra"
+    # The ingress controller (Kong) runs in ns `infra` — fromIngressNamespace above.
+    #
+    # Prometheus scrapes the app's /metrics from ns `observability`. Without it
+    # every ServiceMonitor in the app tier silently reports "down".
+    fromNamespaces:
+      - observability
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    enabled: true
+    # Structured knobs replace the hand-written DNS/same-namespace rules the
+    # chart now generates itself.
+    allowSameNamespace: true
+    dns:
+      enabled: true
+    toNamespaces:
+      # ── Data stores (all live in ns `database`) ──
+      # environments/<env>/kubernetes/network/20-database.yaml has the matching ingress rule
+      # (the `postgresql` / `redis` / `kafka` workload rules) on the `database` side; both are required.
+      - namespace: database
+        ports:
+          - protocol: TCP
+            port: 5432      # postgresql
+          - protocol: TCP
+            port: 6379      # redis
+          - protocol: TCP
+            port: 26379     # redis sentinel (prod topology)
+          - protocol: TCP
+            port: 9092      # kafka
+          - protocol: TCP
+            port: 9000      # minio S3
+      # ── Telemetry → OpenTelemetry Collector ──
+      - namespace: observability
+        ports:
+          - protocol: TCP
+            port: 4317      # OTLP gRPC
+          - protocol: TCP
+            port: 4318      # OTLP HTTP
+    # ── External HTTPS ──
+    # RFC1918 excluded so this cannot be used to reach other in-cluster or
+    # in-VPC services sideways; those need an explicit rule above.
+    allowExternalHTTPS: true
+    # No Kubernetes API rule: every app runs with automountServiceAccountToken:
+    # false. An app that needs the API adds a customRules entry for the cluster's
+    # real API endpoints (EKS: the control-plane ENIs, not the service ClusterIP).
+
+# Restart pods when an externally-managed Secret/ConfigMap changes (ESO rotation,
+# SealedSecrets). Chart-owned config already rolls out via checksum annotations.
+reloader:
+  enabled: true
+  mode: auto
+
+# Shared tmp volume — required because securityContext.readOnlyRootFilesystem: true
+# prevents writing to the container FS. /tmp must be a writable volume.
+# Use name "tmp" consistently across all service files (list replace, not merge).
+#
+# ⚠ `medium: Memory` MAKES THIS TMPFS, AND TMPFS COUNTS AGAINST THE CONTAINER
+#   MEMORY LIMIT. The 128Mi below is deducted from `resources.limits.memory`
+#   before the process allocates anything — at the dev default of 256Mi that is
+#   HALF the budget. Fine for a service that writes a few temp files; not fine
+#   for anything that keeps real state under /tmp.
+#
+#   Observed failure (the now-deleted kong-ingress release): Kong's KONG_PREFIX
+#   pointed at /tmp/kong, putting its LMDB config store in tmpfs. nginx workers
+#   were OOM-killed in a loop while the container stayed `Running` and NOTHING
+#   reported OOMKilled — because it was the workers dying, not PID 1. The only
+#   visible symptom was `[alert] worker process NNNN exited on signal 9` in the
+#   logs, a probe that never passed, and `helmfile sync` blocking to the 900s
+#   timeout.
+#
+#   If a service keeps state under /tmp, override BOTH in its own values file:
+#   drop `medium: Memory` (disk-backed emptyDir) and raise the memory limit.
+
+# ── Volumes ───────────────────────────────────────────────────
+extraVolumes:
+  - name: tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 128Mi
+
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
+
+# Spread each component's replicas across nodes — a preference, so a one-node cluster still
+# schedules. An environment layer or an app hardens it (whenUnsatisfiable: DoNotSchedule) or
+# caps one pod per node (affinity.podAntiAffinity); see kubernetes/charts/application/values.yaml.
+# A list replaces this one entirely (prod/app-values.yaml.gotmpl sets its own).
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    nodeTaintsPolicy: Honor               # tainted nodes the pod cannot use are not empty domains
+    matchLabelKeys: [pod-template-hash]   # count only the current ReplicaSet during a rollout
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+
+# Baseline alerts (crash-looping, not-ready, memory pressure), OFF by default: a
+# PrometheusRule needs the monitoring.coreos.com CRDs, which belong to the monitoring
+# part (kubernetes/releases/observability/kube-prometheus-stack), not to the app. An app must deploy on a
+# cluster without monitoring. Opt in per app (applications/<app>/k8s/<env>/values.yaml)
+# or per environment layer once monitoring runs there: `prometheusRule.enabled: true`.
+# The settings below are what that switch turns on.
+prometheusRule:
+  enabled: false
+  labels:
+    release: kube-prometheus-stack
+  defaultRules:
+    enabled: true
+
+# Post-deploy smoke check — `helm test <release>` in the deploy pipeline.
+tests:
+  enabled: true
+
+# ── Gateway API (Kong) ───────────────────────────────────────
+# Off: apps use Ingress (ingressClassName kong, below). To move one app: in its values set
+# ingress.enabled: false, httpRoute.enabled: true, httpRoute.hostnames: [<host>].
+# The parentRef is the shared Gateway infra/platform (kubernetes/releases/platform/gateway-api);
+# staging/prod attach to the https listener only.
+httpRoute:
+  enabled: false
+  parentRefs:
+    - { name: platform, namespace: infra, sectionName: https }
+
+# ── Ingress ──────────────────────────────────────────────────
+ingress:
+  enabled: true
+  # Kong Ingress Controller (kubernetes/releases/platform/kong, ns infra).
+  className: kong
+  annotations:
+    # Security headers are set globally by the KongClusterPlugin `security-headers`
+    # (global: "true", kubernetes/releases/platform/kong/manifests/plugins.yaml) —
+    # nothing to add per Ingress.
+    # HTTPS only; plain HTTP is redirected with 308 (was nginx ssl-redirect: "true").
+    konghq.com/protocols: "https"
+    konghq.com/https-redirect-status-code: "308"
+    # 8 MB request body limit (was nginx proxy-body-size: "8m").
+    konghq.com/plugins: "request-size-limit"
+    # Auto-issue TLS via cert-manager. The ClusterIssuer ships with the
+    # cert-manager release (cert-manager/values.yaml.gotmpl extraObjects).
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+  # ⚠ hosts + tls are set PER APP, in applications/<app>/k8s/prod/values.yaml — this
+  #   file cannot know the hostnames. cert-manager only issues a certificate
+  #   when a `tls:` block exists; with protocols https and no tls, Kong redirects
+  #   HTTP → HTTPS and serves its built-in self-signed default certificate, so
+  #   every browser request fails with a certificate error. Each service that sets ingress.enabled must therefore
+  #   set BOTH:
+  #     hosts:
+  #       - host: <svc>.example.com
+  #         paths: [ { path: /, pathType: Prefix } ]
+  #     tls:
+  #       - secretName: <svc>-tls
+  #         hosts: [ "<svc>.example.com" ]
+
+# ── Scaling ───────────────────────────────────────────────────
+replicaCount: 3
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80
+  # Anti-flapping. Scale up fast, scale down slowly: without a stabilization
+  # window a spiky prod service oscillates between 3 and 10 replicas, which
+  # costs money and drops in-flight connections on every scale-down.
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - { type: Percent, value: 50, periodSeconds: 60 }
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - { type: Percent, value: 100, periodSeconds: 30 }
+        - { type: Pods, value: 4, periodSeconds: 30 }
+      selectPolicy: Max
+
+# ── Resources ─────────────────────────────────────────────────
+# No CPU limit by design: CPU is compressible and a limit only adds CFS
+# throttling on latency-sensitive request paths. Memory IS limited because it is
+# not compressible — the alternative to an OOMKill is a node-wide eviction
+# cascade. Matches kyverno require-requests-limits, which requires
+# requests.cpu/memory + limits.memory and deliberately omits limits.cpu.
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+# ── Availability ──────────────────────────────────────────────
+# minAvailable: 1 on a 3-replica service only guarantees one survivor; the
+# drain can still take two of three at once. With replicaCount 3 / HPA min 3,
+# maxUnavailable: 1 is the stronger statement and keeps drains unblocked.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+  # Never let a permanently-broken pod block a node drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+# ── Graceful Shutdown ─────────────────────────────────────────
+terminationGracePeriodSeconds: 60
+
+# Native sleep action (k8s >= 1.30; EKS prod is 1.32): no shell needed, so it
+# also works for distroless images. Let endpoints drain before SIGTERM.
+lifecycle:
+  preStop:
+    sleep:
+      seconds: 5

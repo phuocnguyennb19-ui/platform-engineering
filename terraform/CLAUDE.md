@@ -8,12 +8,12 @@ third). This file adds what is specific to `terraform/`; module rules are in
 ## Layout
 
 ```text
-../infra-base/terraform/environments/<env>/{environment,core,backend}.yaml   (values, not here)
+../environments/<env>/terraform/{environment,core,backend}.yaml   (values, not here)
 ../applications/<app>/terraform/{app,<env>}.yaml
 schema/       JSON schemas for the two value directories above
 stacks/core/      Terraform root — shared infrastructure; knows no application
 stacks/registry/  Terraform root — ECR per image.repository of apps enabled in the environment
-stacks/service/   Terraform root — one ECS application per state; EKS apps belong to k8s/
+stacks/service/   Terraform root — one ECS application per state; EKS apps belong to kubernetes/
 shared/       stack-internal modules used by all three roots (config, deep-merge)
 tests/        one test root: *.tftest.hcl + fixtures/ for every shared module
 modules/      L1 reusable AWS modules (modules/CLAUDE.md)
@@ -35,8 +35,9 @@ module change is in every stack's next plan, in every environment.
 - **Never guess environment values.** `account.id`, backend `bucket`/`region`, pinned image tags,
   `eks.access_entries`, and the `.sops.yaml` recipients stay empty until the user supplies them;
   the plan names what is missing.
-- **Paths:** each stack reads `config_root = "${path.root}/../../../infra-base/terraform"` (`shared/config`
-  appends `environments/`), `applications_root = "${path.root}/../../../applications"` (repository
+- **Paths:** each stack reads `config_root = "${path.root}/../../../environments"` (`shared/config`
+  reads `<dir>/terraform/{environment,core,backend}.yaml` and picks the folder whose `environment.yaml`
+  says `environment: <ENVIRONMENT>` — `production` lives in `environments/prod/terraform/`), `applications_root = "${path.root}/../../../applications"` (repository
   root: `shared/config` reads `<app>/terraform/*.yaml`) and `../../shared/config`. Moving a stack means
   updating both, `STACK_DIR` in `ci/terraform/platform.yml`, and the loops in its `validate` job
   and in the root `Makefile`.
@@ -51,7 +52,7 @@ module change is in every stack's next plan, in every environment.
 ## Environments and CI
 
 Environments here are `dev | staging | production` — never `prod` (that is Helm's name).
-`ENVIRONMENT` selects `../infra-base/terraform/environments/<env>/` and, through `allowed_account_ids`, the only account a
+`ENVIRONMENT` selects `../environments/<env>/terraform/` and, through `allowed_account_ids`, the only account a
 run may touch.
 
 - Plans and applies run in GitLab (`ci/terraform/platform.yml`): `plan:*` saves `tfplan`,
@@ -67,7 +68,7 @@ run may touch.
 `make stacks-validate` from the repository root, or:
 
 ```bash
-yamllint --strict environments applications
+yamllint --strict ../environments/*/terraform ../applications/*/terraform
 terraform fmt -check -recursive stacks shared tests
 (cd tests && terraform init -backend=false -test-directory=. && terraform test -test-directory=.)
 for d in stacks/core stacks/registry stacks/service; do (cd $d && terraform init -backend=false && terraform validate); done

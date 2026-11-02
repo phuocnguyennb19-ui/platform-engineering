@@ -1,10 +1,17 @@
 # terraform
 
+| | |
+|---|---|
+| **What it holds** | AWS templates: `modules/` (L1, reusable, typed inputs), `stacks/` (L2 roots `core` → `registry` → `service`), `shared/`, `schema/`, `tests/`. No values. |
+| **Owner** | platform team (IAM, KMS, security groups: + security team) |
+| **How to change** | values in `environments/<env>/terraform/` and `applications/<app>/terraform/`; a module change reaches every stack and environment on its next plan |
+| **Validate** | `make fmt` · `make modules-test MODULE=<name>` · `make stacks-validate` (Terraform ≥ 1.10). Plan/apply only in CI. |
+
 Terraform for the platform: environment configuration, application deployment configuration,
 configuration validation, Terraform composition (`stacks/`), state layout and the deployment
 pipeline (`ci/terraform/platform.yml`). Reusable AWS modules live beside it in `modules/` and
 are sourced by relative path (`../../modules/<name>` from a stack) — no tags; a module change
-reaches every stack's next plan. Helm lives in `k8s/` of the same repository.
+reaches every stack's next plan. Helm lives in `kubernetes/` of the same repository.
 
 Commands below run from `terraform/`.
 Application repositories own source, Dockerfile and the image pipeline, and nothing else.
@@ -13,15 +20,15 @@ The Terraform code names no application. Applications exist only as YAML: adding
 `applications/<app>/terraform/` directory at the repository root, with no Terraform, CI or core change.
 
 ```text
-../infra-base/terraform/environments/<env>/environment.yaml    account, region, name prefix, tags, release policy
-../infra-base/terraform/environments/<env>/core.yaml           shared infrastructure: vpc, ecs, eks, alb, dns, iam, ecr, logs
-../infra-base/terraform/environments/<env>/backend.yaml        state bucket, region, encrypt, use_lockfile
+../environments/<env>/terraform/environment.yaml    account, region, name prefix, tags, release policy
+../environments/<env>/terraform/core.yaml           shared infrastructure: vpc, ecs, eks, alb, dns, iam, ecr, logs
+../environments/<env>/terraform/backend.yaml        state bucket, region, encrypt, use_lockfile
 ../applications/<app>/terraform/app.yaml     identity, runtime, image repository, container defaults
 ../applications/<app>/terraform/<env>.yaml   per-environment values; its presence enables the app there
 schema/*.schema.json                   JSON Schema for each of the five file kinds
 stacks/core/                           Terraform root, layer 1: network, clusters, ALB, DNS, ACM, IAM, CloudWatch
 stacks/registry/                       Terraform root, layer 2: one ECR repository per image.repository
-stacks/service/                        Terraform root, layer 3: every ECS application (EKS apps: k8s/)
+stacks/service/                        Terraform root, layer 3: every ECS application (EKS apps: kubernetes/)
 shared/
   config/                              YAML loading, validation, mapping to typed values; used by all three roots
   deep-merge/                          explicit deep merge (Terraform merge() is shallow)
@@ -45,7 +52,7 @@ in `modules/`, whose modules never read configuration.
 | service | `stacks/service/` | one: `var.application` | `<env>/services/<app>.tfstate` |
 
 Every `backend.tf` is `terraform { backend "s3" {} }`. Bucket, region, `encrypt` and
-`use_lockfile` come from `../infra-base/terraform/environments/<env>/backend.yaml`; the key is derived per layer
+`use_lockfile` come from `../environments/<env>/terraform/backend.yaml`; the key is derived per layer
 and must not be set there. Locking is S3-native, hence Terraform >= 1.10. The service layer reads
 the core and registry states from the same bucket.
 
@@ -71,7 +78,7 @@ another environment's credentials fails before it reads anything.
 ### core.yaml
 
 `vpc` (required), `ecs.enabled` and `eks.enabled` (required),
-`eks.addon_roles` (IRSA roles for the add-ons k8s/ installs — `external-dns`,
+`eks.addon_roles` (IRSA roles for the add-ons kubernetes/ installs — `external-dns`,
 `cluster-autoscaler`, `velero` — each with its `service_accounts`; the role is
 `<cluster>-irsa-<key>`, the policy is that project's documented minimum, and `velero` also gets
 the bucket `<name>-velero-<account>`), `eks.access_entries` (IAM principals, such as the plan and apply roles, mapped to cluster access
@@ -81,7 +88,7 @@ container ports the ALB may reach on ECS tasks besides 8080), `dns` (`zone_name`
 `create_zone`; enables Route53 and an ACM certificate for `zone` and `*.zone`), `iam` (`enabled`,
 `ec2_instance_role`, `rds_monitoring_role`), `ecr` (`image_tag_mutability` must stay `IMMUTABLE`,
 `force_delete`, `mirror_repositories` — third-party repositories such as `bitnami/postgresql`
-that the k8s/ mirror job fills), `sops.kms_key` (a KMS key for the k8s/ SOPS
+that the kubernetes/ mirror job fills), `sops.kms_key` (a KMS key for the kubernetes/ SOPS
 secrets; output `sops_kms_key_arn`), `logs.retention_days`, `alerts.subscriptions`. A public ALB requires `dns`,
 because its HTTPS listener needs the certificate. Application keys are rejected.
 
@@ -90,7 +97,7 @@ because its HTTPS listener needs the certificate. Application keys are rejected.
 | Key | Required | |
 |---|---|---|
 | `application.name` | yes | must equal the directory name |
-| `runtime.type` | yes | `ecs` or `eks`; the runtime must be enabled in `core.yaml`. An `eks` application only gets its ECR repository here — k8s/ (helmfile or Argo CD) deploys it, and a service plan for it is refused |
+| `runtime.type` | yes | `ecs` or `eks`; the runtime must be enabled in `core.yaml`. An `eks` application only gets its ECR repository here — kubernetes/ (helmfile or Argo CD) deploys it, and a service plan for it is refused |
 | `image.repository` | yes | ECR repository name; set here and nowhere else |
 | `container.port` | yes | |
 | `container.health_check_command` | no | ECS container health check |
@@ -133,7 +140,7 @@ and, when the host is inside the core Route53 zone, an alias record. Health chec
 priority hashed from host and path into 10000-49999. Across every application enabled in an
 environment, the plan rejects a duplicated host and path, a duplicated priority, and a shared
 host without explicit priorities. `network` applies to `ecs` applications; EKS routing is the
-k8s/ chart's Ingress.
+kubernetes/ chart's Ingress.
 
 The plan also fails when `network` is set but core has no ALB, when `container.port` is neither
 8080 nor inside `alb.target_port_range`, or when the host is not covered by the core
@@ -248,8 +255,9 @@ trigger-platform:
 ## Local
 
 ```bash
-export ENVIRONMENT=dev
-BACKEND="$PWD/../infra-base/terraform/environments/$ENVIRONMENT/backend.yaml"
+export ENVIRONMENT=dev                                    # dev | staging | production
+ENV_DIR=$(case "$ENVIRONMENT" in production) echo prod ;; *) echo "$ENVIRONMENT" ;; esac)
+BACKEND="$PWD/../environments/$ENV_DIR/terraform/backend.yaml"
 init() {
   terraform init -backend-config="bucket=$(yq '.bucket' $BACKEND)" -backend-config="region=$(yq '.region' $BACKEND)" \
     -backend-config="encrypt=true" -backend-config="use_lockfile=true" -backend-config="key=$1"
@@ -261,11 +269,11 @@ init() {
   terraform plan -var="environment=$ENVIRONMENT" -var="application=birthday-app" -var="image_tag=<commit-sha>")
 ```
 
-Each root reads `../../../infra-base/terraform/environments` and `../../../applications`, so run Terraform inside `stacks/core/`, `stacks/registry/` or `stacks/service/`.
+Each root reads `../../../environments/<dir>/terraform/` (`production` → `prod/`) and `../../../applications`, so run Terraform inside `stacks/core/`, `stacks/registry/` or `stacks/service/`.
 Validation without AWS:
 
 ```bash
-yamllint --strict environments applications
+yamllint --strict ../environments/*/terraform ../applications/*/terraform
 terraform fmt -check -recursive stacks shared tests
 (cd tests && terraform init -backend=false -test-directory=. && terraform test -test-directory=.)
 for d in stacks/core stacks/registry stacks/service; do (cd $d && terraform init -backend=false && terraform validate); done

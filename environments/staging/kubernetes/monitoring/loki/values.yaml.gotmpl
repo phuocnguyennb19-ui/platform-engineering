@@ -1,0 +1,55 @@
+# ============================================================
+# Loki — deployment topology (mode / replicas / persistence / gateway)
+# Server config (schema/limits/compactor/storage/ruler) lives in
+# loki/config.yaml.gotmpl. Env sizing via the $size table below.
+#
+# dev / staging → SingleBinary + filesystem PVC  (cheap, simple)
+# prod          → SimpleScalable + S3 object store (durable, HA)
+# ============================================================
+
+fullnameOverride: loki
+
+# nginx gateway — stable in-cluster entrypoint used by Grafana/Alloy.
+# nginx gateway — stable in-cluster entrypoint used by Grafana/Alloy.
+gateway:
+  enabled: true
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+  replicas: 1
+
+# Subcharts we don't run here (metrics via kube-prometheus-stack; caches
+# only needed at higher scale).
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+test:
+  enabled: false
+deploymentMode: SingleBinary
+# ── SingleBinary mode (dev/staging) ─────────────────────────
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 50Gi
+    {{- if (.Values.storageClass) }}
+    storageClass: {{ (.Values.storageClass) }}
+    {{- end }}
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits:   { cpu: 1, memory: 1Gi }
+# Disable scalable components in SingleBinary mode.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+lokiCanary:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false

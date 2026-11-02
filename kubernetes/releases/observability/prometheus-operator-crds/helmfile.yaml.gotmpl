@@ -1,0 +1,37 @@
+# ============================================================
+# prometheus-operator-crds — the monitoring.coreos.com CRDs only (ServiceMonitor, PodMonitor,
+# PrometheusRule, Probe, Prometheus, Alertmanager, …). Deploys FIRST, before kube-prometheus-stack.
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev --kube-context <ctx> -f kubernetes/releases/observability/prometheus-operator-crds/helmfile.yaml.gotmpl sync   # from the repo root
+#
+# Why a separate release: ~19 tools render a ServiceMonitor; with the CRDs here any of them can be
+# synced on its own without kube-prometheus-stack, and helm upgrades CRDs in a chart's templates
+# (kube-prometheus-stack's crds/ are installed once and never upgraded).
+# The version must match kube-prometheus-stack's operator: chart 30.0.1 = operator v0.92.1 =
+# kube-prometheus-stack 87.19.1. Bump both together.
+# No secrets: nothing here reads them, so it renders without the SOPS age key.
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../repositories.yaml
+environments:
+  dev:     { values: [ ../../../../environments/dev/kubernetes/state.yaml ] }
+  staging: { values: [ ../../../../environments/staging/kubernetes/state.yaml ] }
+  prod:    { values: [ ../../../../environments/prod/kubernetes/state.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: prometheus-operator-crds
+    namespace: kube-system      # exists on every cluster; CRDs are cluster-scoped, this is only where helm keeps the release
+    chart: prometheus-community/prometheus-operator-crds
+    version: 30.0.1
+    missingFileHandler: Error
+    labels: { name: prometheus-operator-crds, layer: platform, tier: infra, component: metrics, env: "{{ $env }}" }
+    values:
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/monitoring/prometheus-operator-crds/values.yaml.gotmpl

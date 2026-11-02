@@ -10,7 +10,7 @@
 .tfp-changes: &tfp-changes
   changes:
     - "terraform/**/*"
-    - "infra-base/terraform/**/*"          # environment values (environments/<env>/)
+    - "environments/*/terraform/**/*"      # environment values (environments/<dir>/terraform/)
     - "applications/*/terraform/**/*"
     - "ci/terraform/**/*"
     - .gitlab-ci.yml
@@ -28,7 +28,8 @@
     - cd "$CI_PROJECT_DIR/terraform"
     - set -eu
     - apk add --no-cache "$YQ_APK" ${EXTRA_APK:-}
-    - BACKEND="../infra-base/terraform/environments/${ENVIRONMENT}/backend.yaml"
+    - 'ENV_DIR="$ENVIRONMENT"; [ "$ENVIRONMENT" != production ] || ENV_DIR=prod   # folders carry the Helm name'
+    - BACKEND="../environments/${ENV_DIR}/terraform/backend.yaml"
     - TF_STATE_BUCKET="$(yq '.bucket // ""' "$BACKEND")"
     - TF_STATE_REGION="$(yq '.region // ""' "$BACKEND")"
     - '[ -n "$TF_STATE_BUCKET" ] && [ -n "$TF_STATE_REGION" ] || { echo "${BACKEND}: bucket and region are required"; exit 1; }'
@@ -90,8 +91,11 @@ check-inputs:
     - cd "$CI_PROJECT_DIR/terraform"
     - set -eu
     - '[ -z "${IMAGE_REPOSITORY:-}" ] || { echo "IMAGE_REPOSITORY is not accepted: the repository comes from applications/<app>/terraform/app.yaml"; exit 1; }'
-    - echo "$ENVIRONMENT" | grep -qE '^[a-z][a-z0-9-]{1,31}$' || { echo "ENVIRONMENT '${ENVIRONMENT}' is not a valid environment name"; exit 1; }
-    - for f in environment core backend; do test -f "../infra-base/terraform/environments/${ENVIRONMENT}/${f}.yaml" || { echo "../infra-base/terraform/environments/${ENVIRONMENT}/${f}.yaml not found"; exit 1; }; done
+    - 'case "$ENVIRONMENT" in dev|staging|production) ;; *) echo "ENVIRONMENT must be dev, staging or production (Terraform names), got: ${ENVIRONMENT}"; exit 1 ;; esac'
+    - 'ENV_DIR="$ENVIRONMENT"; [ "$ENVIRONMENT" != production ] || ENV_DIR=prod   # folders carry the Helm name'
+    - for f in environment core backend; do test -f "../environments/${ENV_DIR}/terraform/${f}.yaml" || { echo "../environments/${ENV_DIR}/terraform/${f}.yaml not found"; exit 1; }; done
+    # The folder must declare this exact Terraform name: ENVIRONMENT=prod (Helm's name) must not reach the prod folder.
+    - 'grep -qE "^environment: *\"?${ENVIRONMENT}\"? *(#.*)?$" "../environments/${ENV_DIR}/terraform/environment.yaml" || { echo "../environments/${ENV_DIR}/terraform/environment.yaml does not declare environment: ${ENVIRONMENT}"; exit 1; }'
     - |
       if [ -n "$APP_NAME" ]; then
         echo "$APP_NAME" | grep -qE '^[a-z0-9][a-z0-9-]{0,62}$' || { echo "APP_NAME '${APP_NAME}' is not a valid application name"; exit 1; }
@@ -115,9 +119,9 @@ config:
   script:
     - cd "$CI_PROJECT_DIR/terraform"
     - 'pip install --quiet --require-hashes --only-binary=:all: -r ../ci/terraform/requirements.txt'
-    - yamllint --strict ../infra-base/terraform/environments ../applications/*/terraform
+    - yamllint --strict ../environments/*/terraform ../applications/*/terraform
     - check-jsonschema --check-metaschema schema/*.json
-    - for t in environment core backend; do check-jsonschema --schemafile "schema/${t}.schema.json" ../infra-base/terraform/environments/*/"${t}.yaml"; done
+    - for t in environment core backend; do check-jsonschema --schemafile "schema/${t}.schema.json" ../environments/*/terraform/"${t}.yaml"; done
     - find ../applications -path '*/terraform/app.yaml' -exec check-jsonschema --schemafile schema/app.schema.json {} +
     - find ../applications -path '*/terraform/*.yaml' ! -name app.yaml -exec check-jsonschema --schemafile schema/app-environment.schema.json {} +
 
@@ -244,10 +248,12 @@ promote:image:
     - cd "$CI_PROJECT_DIR/terraform"
     - set -eu
     - apk add --no-cache "$YQ_APK" "$AWS_CLI_APK"
-    - TARGET="../infra-base/terraform/environments/${ENVIRONMENT}/environment.yaml"
+    - 'ENV_DIR="$ENVIRONMENT"; [ "$ENVIRONMENT" != production ] || ENV_DIR=prod   # folders carry the Helm name'
+    - TARGET="../environments/${ENV_DIR}/terraform/environment.yaml"
     - SOURCE_ENV="$(yq '.release.promote_from // ""' "$TARGET")"
     - if [ -z "$SOURCE_ENV" ]; then echo "${ENVIRONMENT} has no release.promote_from, nothing to promote"; exit 0; fi
-    - SOURCE="../infra-base/terraform/environments/${SOURCE_ENV}/environment.yaml"
+    - 'SOURCE_DIR="$SOURCE_ENV"; [ "$SOURCE_ENV" != production ] || SOURCE_DIR=prod'
+    - SOURCE="../environments/${SOURCE_DIR}/terraform/environment.yaml"
     - PINNED="$(yq '.image.tag // ""' "../applications/${APP_NAME}/terraform/${ENVIRONMENT}.yaml")"
     - TAG="${IMAGE_TAG:-$PINNED}"
     - '[ "$(yq ".release.image_tag_source" "$TARGET")" != config ] || [ "$TAG" = "$PINNED" ] || { echo "IMAGE_TAG ${TAG} does not match image.tag ${PINNED} in applications/${APP_NAME}/terraform/${ENVIRONMENT}.yaml"; exit 1; }'

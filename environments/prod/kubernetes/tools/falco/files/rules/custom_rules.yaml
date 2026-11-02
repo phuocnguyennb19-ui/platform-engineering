@@ -1,0 +1,51 @@
+# ============================================================
+# Falco — custom rules & overrides (mounted as ConfigMap via `customRules`)
+# readFile'd into values.yaml.gotmpl. Layered ON TOP of the chart-shipped
+# falco_rules.yaml (never edit those — they are replaced on every upgrade).
+# Env-agnostic: match trusted images by repo substring, not a hardcoded domain.
+# ============================================================
+
+# ── Allowlist: ops break-glass images may run a shell ───────
+- macro: allowed_ops_shells
+  condition: >
+    (container.image.repository contains "harbor" and
+     container.image.repository contains "/ops/")
+
+- rule: Terminal shell in container
+  append: true
+  condition: and not allowed_ops_shells
+
+# ── High-signal additions ───────────────────────────────────
+- rule: Write below etc
+  desc: Detect any write beneath /etc inside a container (config tampering)
+  condition: >
+    open_write and container and fd.name startswith /etc
+    and not proc.name in (dpkg, rpm, apt, apt-get, update-alternatives)
+  output: >
+    File below /etc opened for writing (user=%user.name command=%proc.cmdline
+    file=%fd.name container=%container.name image=%container.image.repository)
+  priority: WARNING
+  tags: [filesystem, mitre_persistence]
+
+- rule: Outbound connection to non-standard port
+  desc: Container initiating egress to an uncommon port (possible C2)
+  condition: >
+    outbound and container
+    and not fd.sport in (53, 80, 443, 5432, 6379, 9092, 9000, 3100, 9090)
+    and not proc.name in (prometheus, alloy, otelcol, promtail)
+  output: >
+    Unexpected outbound connection (command=%proc.cmdline connection=%fd.name
+    container=%container.name image=%container.image.repository)
+  priority: NOTICE
+  tags: [network, mitre_command_and_control]
+
+- rule: Package management launched in container
+  desc: Detect runtime package installs (drift from immutable images)
+  condition: >
+    spawned_process and container
+    and proc.name in (apt, apt-get, apk, yum, dnf, pip, pip3, npm, gem)
+  output: >
+    Package manager run in container (command=%proc.cmdline
+    container=%container.name image=%container.image.repository)
+  priority: WARNING
+  tags: [software_mgmt, mitre_persistence]

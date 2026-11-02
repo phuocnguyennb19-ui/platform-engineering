@@ -1,0 +1,14 @@
+# ============================================================
+# Repository-root helmfile — lets an application be deployed from the root:
+#   helmfile -e <dev|staging|prod> -l name=<app> diff|sync
+# It holds no releases; the app releases, their value layers and the release guard live in
+# applications/helmfile.yaml.gotmpl. The target cluster comes from
+# environments/<env>/kubernetes/cluster/target.yaml (+ gitignored target.local.yaml). Platform tools stay in kubernetes/.
+# ============================================================
+environments:
+  dev: {}
+  staging: {}
+  prod: {}
+---
+helmfiles:
+  - path: applications/helmfile.yaml.gotmpl

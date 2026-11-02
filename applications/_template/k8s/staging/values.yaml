@@ -1,0 +1,474 @@
+# __APP__ · staging — toàn bộ cấu hình của app ở môi trường staging (chart kubernetes/charts/application).
+# Mọi key đều active với giá trị app sẽ nhận ở môi trường này; sửa key nào app cần khác.
+# Sinh bởi scripts/docs/gen-app-template.sh (make docs-reference) — không sửa tay; tạo app: make new-app.
+
+# ── Identity ── tên object và label/annotation chung; để trống = tên release
+nameOverride: ""
+fullnameOverride: ""
+namespaceOverride: ""
+commonLabels: {}
+commonAnnotations: {}
+
+# ── Global ── registry do môi trường đặt (global.imageRegistry trong environments/<env>/kubernetes/app-values), không ghi ở đây
+global:
+  podSecurityContext: {}
+  securityContext: {}
+
+# ── Image ── repository = image.repository trong ../../terraform/app.yaml; tag hoặc digest bắt buộc
+image:
+  registry: ""
+  repository: "__APP__"
+  tag: "REPLACE_WITH_IMAGE_TAG"
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# ── Workload shape ── Deployment | StatefulSet | DaemonSet, chiến lược rollout, số replica
+workload:
+  kind: Deployment
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  minReadySeconds: 0
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  statefulset:
+    serviceName: ""
+    podManagementPolicy: OrderedReady
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate: {}
+    persistentVolumeClaimRetentionPolicy: {}
+    volumeClaimTemplates: []
+  daemonset:
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 1
+replicaCount: 2
+
+# ── ServiceAccount ── chỉ bật automountServiceAccountToken khi app gọi Kubernetes API
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+  annotations: {}
+  imagePullSecrets: []
+  secrets: []
+
+# ── RBAC ── tắt mặc định — chỉ bật khi app cần quyền trên API
+rbac:
+  create: false
+  rules: []
+  clusterRules: []
+
+# ── Security ── sàn bảo mật của nền (PSA restricted); chỉ nới khi có lý do
+securityDefaults:
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    privileged: false
+    capabilities:
+      drop: [ALL]
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# ── Entrypoint ── ghi đè ENTRYPOINT/CMD của image
+command: []
+args: []
+
+# ── Environment ── biến môi trường; bí mật lấy qua extraEnvFrom/secretRef, không ghi giá trị
+env: {}
+secretEnv: {}
+envRaw: []
+extraEnvFrom: []
+
+# ── Ports ── cổng phụ (metrics 9090); cổng chính là service.targetPort
+extraPorts:
+  - {name: metrics, containerPort: 9090, protocol: TCP}
+
+# ── Service ── Service ClusterIP trỏ vào cổng http
+service:
+  enabled: true
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  nodePort: ""
+  appProtocol: ""
+  annotations: {}
+  sessionAffinity: ""
+  sessionAffinityConfig: {}
+  loadBalancerClass: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: ""
+  internalTrafficPolicy: ""
+  ipFamilyPolicy: ""
+  publishNotReadyAddresses: false
+  extraPorts: []
+  headless:
+    enabled: false
+    publishNotReadyAddresses: true
+    annotations: {}
+
+# ── Health probes ── bắt buộc ở prod
+probes:
+  startup:
+    httpGet:
+      path: /healthz
+      port: http
+    failureThreshold: 30
+    periodSeconds: 2
+  liveness:
+    httpGet:
+      path: /healthz
+      port: http
+    periodSeconds: 15
+    timeoutSeconds: 3
+  readiness:
+    httpGet:
+      path: /readyz
+      port: http
+    periodSeconds: 10
+    timeoutSeconds: 3
+
+# ── Resources ── đo theo mức dùng thật; không đặt limits.cpu
+resources:
+  requests: {cpu: 50m, memory: 128Mi}
+  limits: {memory: 256Mi}
+
+# ── Lifecycle ── thời gian tắt êm và preStop
+terminationGracePeriodSeconds: 30
+lifecycle: {}
+
+# ── Autoscaling ── HPA, KEDA, VPA — chọn tối đa một cơ chế scale ngang
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 75
+  customMetrics: []
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - {type: Percent, value: 50, periodSeconds: 60}
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 30}
+        - {type: Pods, value: 4, periodSeconds: 30}
+      selectPolicy: Max
+keda:
+  enabled: false
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 30
+  cooldownPeriod: 300
+  idleReplicaCount: ~
+  fallback: {}
+  advanced: {}
+  triggers: []
+verticalPodAutoscaler:
+  enabled: false
+  updateMode: "Off"
+  resourcePolicy: {}
+
+# ── Availability ── PDB, rải pod theo node/zone, nodeSelector/affinity/tolerations
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: ""
+  unhealthyPodEvictionPolicy: ""
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    nodeTaintsPolicy: Honor
+    matchLabelKeys: [pod-template-hash]
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+runtimeClassName: ""
+schedulerName: ""
+
+# ── Pod-spec escape hatches ── trường pod-spec ít dùng; host* luôn false (PSA restricted)
+hostNetwork: false
+hostPID: false
+hostIPC: false
+shareProcessNamespace: false
+hostAliases: []
+dnsPolicy: ""
+dnsConfig: {}
+podLabels: {}
+podAnnotations: {}
+
+# ── Volumes ── tmp là tmpfs (tính vào limits.memory); list thay thế cả danh sách
+extraVolumes:
+  - name: tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 128Mi
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
+
+# ── initContainers ── chạy trước container chính
+initContainers: []
+
+# ── Sidecars ── container chạy kèm
+extraContainers: []
+
+# ── Proxy sidecar ──
+proxy:
+  enabled: false
+  image:
+    registry: ""
+    repository: nginxinc/nginx-unprivileged
+    tag: "1.30.5-alpine-slim"
+    digest: sha256:7f79f463c6eb0d0bf8782992bb9636434398e3e5848398805aef2c9b025d8609
+    pullPolicy: IfNotPresent
+  port: 8080
+  upstreamPort: ~
+  healthPath: /nginx-health
+  clientMaxBodySize: 8m
+  timeouts:
+    connect: 5s
+    send: 60s
+    read: 60s
+  upstreamKeepalive:
+    connections: 16
+    timeout: 4s
+  realIpFrom: []
+  workerProcesses: 1
+  workerConnections: 1024
+  accessLog: true
+  errorLogLevel: warn
+  httpSnippet: ""
+  serverSnippet: ""
+  config: ""
+  tmpSizeLimit: 64Mi
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  securityContext: {}
+  shutdown:
+    drainSeconds: 5
+    appPreStopSleepSeconds: 15
+
+# ── Workers ── Deployment phụ dùng chung image/config
+workers: []
+
+# ── CronJobs ── job định kỳ
+cronjobDefaults:
+  timeZone: "Asia/Ho_Chi_Minh"
+  concurrencyPolicy: Forbid
+  backoffLimit: 2
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  restartPolicy: Never
+cronjobs: []
+
+# ── Config & Secrets ── ConfigMap/Secret của chart, ExternalSecret, Reloader
+configmap:
+  enabled: false
+  nameOverride: ""
+  annotations: {}
+  data: {}
+  binaryData: {}
+extraConfigMaps: {}
+secret:
+  enabled: false
+  nameOverride: ""
+  type: Opaque
+  annotations: {}
+  data: {}
+  stringData: {}
+externalSecret:
+  enabled: false
+  apiVersion: external-secrets.io/v1
+  refreshInterval: 1h
+  injectEnvFrom: true
+  secretStoreRef:
+    name: ""
+    kind: ClusterSecretStore
+  target:
+    name: ""
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    template: {}
+  data: []
+  dataFrom: []
+reloader:
+  enabled: true
+  mode: auto
+  configmaps: []
+  secrets: []
+
+# ── North-south routing ── Ingress hoặc HTTPRoute/GRPCRoute — không bật cả hai
+ingress:
+  enabled: true
+  className: "kong"
+  annotations:
+    konghq.com/protocols: "https"
+    konghq.com/https-redirect-status-code: "308"
+    konghq.com/plugins: "request-size-limit"
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+  defaultBackend: {}
+  hosts:
+    - host: __APP__.staging.example.com
+      paths:
+        - {path: /, pathType: Prefix}
+  tls:
+    - secretName: __APP__-tls
+      hosts: ["__APP__.staging.example.com"]
+httpRoute:
+  enabled: false
+  apiVersion: gateway.networking.k8s.io/v1
+  annotations: {}
+  parentRefs:
+    - {name: platform, namespace: infra, sectionName: https}
+  hostnames: []
+  timeouts: {}
+  rules: []
+grpcRoute:
+  enabled: false
+  apiVersion: gateway.networking.k8s.io/v1
+  annotations: {}
+  parentRefs: []
+  hostnames: []
+  rules: []
+
+# ── NetworkPolicy ── luật mạng của app; allowSameNamespace phải giữ true
+networkPolicy:
+  enabled: true
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    enabled: true
+    allowSameNamespace: true
+    fromIngressNamespace: "infra"
+    fromNamespaces:
+      - observability
+    from: []
+    ports: []
+    customRules: []
+  egress:
+    enabled: true
+    allowSameNamespace: true
+    dns:
+      enabled: true
+      namespaceSelector: {}
+      podSelector: {}
+      port: 53
+    toNamespaces:
+      - namespace: database
+        ports:
+          - protocol: TCP
+            port: 5432
+          - protocol: TCP
+            port: 6379
+          - protocol: TCP
+            port: 9092
+          - protocol: TCP
+            port: 9000
+      - namespace: observability
+        ports:
+          - protocol: TCP
+            port: 4317
+          - protocol: TCP
+            port: 4318
+    allowExternalHTTPS: true
+    externalExcept: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254/32]
+    customRules: []
+
+# ── Observability ── ServiceMonitor/PrometheusRule cần CRD của kube-prometheus-stack
+serviceMonitor:
+  enabled: true
+  namespace: ""
+  port: metrics
+  path: /metrics
+  interval: 30s
+  scrapeTimeout: 10s
+  scheme: ""
+  honorLabels: false
+  tlsConfig: {}
+  bearerTokenSecret: {}
+  labels:
+    release: kube-prometheus-stack
+  relabelings: []
+  metricRelabelings: []
+  extraEndpoints: []
+prometheusRule:
+  enabled: false
+  labels:
+    release: kube-prometheus-stack
+  defaultRules:
+    enabled: true
+    podCrashLooping:
+      enabled: true
+      threshold: 3
+      for: 5m
+      severity: critical
+    podNotReady:
+      enabled: true
+      for: 15m
+      severity: warning
+    highMemoryUsage:
+      enabled: true
+      threshold: 0.90
+      for: 10m
+      severity: warning
+    highErrorRate:
+      enabled: false
+      metric: http_requests_total
+      errorSelector: 'code=~"5.."'
+      threshold: 0.05
+      for: 10m
+      severity: critical
+  groups: []
+
+# ── helm test ── smoke test sau deploy
+tests:
+  enabled: true
+  image: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+  path: /
+  timeoutSeconds: 10
+
+# ── Raw manifests shipped with the release ── manifest thô đi kèm release
+extraObjects: []

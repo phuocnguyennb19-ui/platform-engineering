@@ -5,10 +5,10 @@ know nothing about YAML, environments or state. No environment lives here.
 
 Commands below run from `terraform/`.
 
-`terraform/stacks/` consumes them: it turns a developer's YAML (`infra-base/terraform/environments/`,
+`terraform/stacks/` consumes them: it turns a developer's YAML (`environments/<env>/terraform/`,
 `applications/<app>/terraform/`) into module inputs and sources each module by relative path inside
 this one repository. `terraform/modules` owns infrastructure capability; `terraform/stacks`
-owns configuration, policy, composition and state; `k8s/` holds Helm.
+owns configuration, policy, composition and state; `kubernetes/` holds Helm.
 
 ```
 terraform/stacks          YAML → mapping → policy → composition → state + CI

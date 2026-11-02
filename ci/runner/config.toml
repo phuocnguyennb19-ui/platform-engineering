@@ -1,5 +1,9 @@
-# GitLab Runner configuration
+# GitLab Runner configuration — BUILD runner (jobs that need the Docker socket)
 # Path trên host: /etc/gitlab-runner/config.toml
+#
+# Job containers here get /var/run/docker.sock, i.e. root on this host. Jobs that
+# hold deploy roles or SOPS keys belong on the protected deploy runner on another
+# host (config.deploy.toml); cutover in ci/README.md, "Runners".
 #
 # Không hardcode token ở đây — inject qua env var khi register.
 # Register command:

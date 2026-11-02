@@ -1,0 +1,26 @@
+# External Secrets Operator — sync secrets from Vault/AWS SM/GCP
+
+installCRDs: true
+resources:
+  requests: { cpu: 20m, memory: 64Mi }
+  limits:   { cpu: 100m, memory: 256Mi }
+
+webhook:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits:   { cpu: 100m, memory: 128Mi }
+  replicaCount: 2
+
+certController:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits:   { cpu: 100m, memory: 128Mi }
+  replicaCount: 2
+
+# Ship metrics to Prometheus.
+serviceMonitor:
+  enabled: true
+replicaCount: 2
+
+# NOTE: a (Cluster)SecretStore is cluster-specific config (Vault/AWS/GCP backend
+# + auth). Create it separately once the operator is Ready. See example-secretstore.yaml.

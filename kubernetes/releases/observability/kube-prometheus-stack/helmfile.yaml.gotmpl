@@ -1,0 +1,39 @@
+# ============================================================
+# kube-prometheus-stack — monitoring engine (operator, Prometheus, Alertmanager, exporters). Deploys right after prometheus-operator-crds (CRDs: crds.enabled false).
+#
+# Self-contained helmfile state. Deploy this tool alone:
+#   helmfile -e dev --kube-context <ctx> -f kubernetes/releases/observability/kube-prometheus-stack/helmfile.yaml.gotmpl sync   # from the repo root
+#
+# ⚠ Each folder is a SEPARATE state, so `needs` cannot reference a release in
+#   another folder. Deploy ORDER lives in the root helmfile.yaml.gotmpl include
+#   list — that list is load-bearing, this file must not encode cross-tool order.
+# ============================================================
+bases:
+  - ../../../repositories.yaml
+environments:
+  dev:     { values: [ ../../../../environments/dev/kubernetes/state.yaml ], secrets: [ ../../../../environments/dev/kubernetes/secrets.enc.yaml ] }
+  staging: { values: [ ../../../../environments/staging/kubernetes/state.yaml ], secrets: [ ../../../../environments/staging/kubernetes/secrets.enc.yaml ] }
+  prod:    { values: [ ../../../../environments/prod/kubernetes/state.yaml ], secrets: [ ../../../../environments/prod/kubernetes/secrets.enc.yaml ] }
+
+---
+{{- $env := .Environment.Name }}
+
+releases:
+  - name: kube-prometheus-stack
+    namespace: observability
+    createNamespace: true
+    chart: prometheus-community/kube-prometheus-stack
+    version: 87.19.1
+    # This release ships the monitoring.coreos.com CRDs its own templates use. On a first
+    # install helm-diff validates against a cluster that does not have them yet and fails
+    # ("no matches for kind Prometheus/PrometheusRule"); skip validation only while the
+    # release is not installed. sync is unaffected: helm installs crds/ before templates.
+    disableValidationOnInstall: true
+    missingFileHandler: Error
+    labels: { name: kube-prometheus-stack, layer: platform, tier: infra, component: metrics, env: "{{ $env }}" }
+    values:
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/monitoring/kube-prometheus-stack/values.yaml.gotmpl
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/monitoring/kube-prometheus-stack/prometheus.yaml.gotmpl
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/monitoring/kube-prometheus-stack/scrape-configs.yaml.gotmpl
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/monitoring/kube-prometheus-stack/alertmanager.yaml.gotmpl
+      - ../../../../environments/{{ .Environment.Name }}/kubernetes/monitoring/prometheus-rules/platform.yaml.gotmpl

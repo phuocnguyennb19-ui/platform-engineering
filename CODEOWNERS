@@ -1,0 +1,40 @@
+# Code owners (GitLab). Approval of a merge request touching a path needs one of its owners.
+# Group names are placeholders — replace them with the real GitLab groups before enabling
+# "Require approval from code owners" on the protected branch.
+# The last matching pattern wins.
+
+[Platform]
+*                                   @platform-team
+
+[Applications]
+/applications/                      @platform-team @app-teams
+/applications/_template/            @platform-team
+
+[Production] @platform-team @security-team
+/environments/prod/kubernetes/
+/applications/*/k8s/prod/
+/environments/prod/terraform/
+
+[Security] @security-team
+/CODEOWNERS
+/.gitignore
+/.sops.yaml
+/environments/*/kubernetes/namespace/
+/environments/*/kubernetes/tools/kyverno/
+/environments/*/kubernetes/tools/falco/
+/kubernetes/charts/application/
+/kubernetes/argocd/
+/terraform/modules/eks/
+/terraform/stacks/core/
+/environments/*/kubernetes/secrets.enc.yaml
+/environments/*/kubernetes/network/
+/kubernetes/releases/platform/kyverno/
+/kubernetes/releases/platform/falco/
+/terraform/modules/iam/
+/terraform/modules/kms/
+/terraform/modules/security-groups/
+
+[Delivery gates] @platform-team @security-team
+/.gitlab-ci.yml
+/ci/
+/scripts/deploy/

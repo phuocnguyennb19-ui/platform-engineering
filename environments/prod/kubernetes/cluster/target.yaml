@@ -1,0 +1,10 @@
+# Deploy target of the `prod` Helm environment — which cluster its app releases go to.
+# Read by applications/helmfile.yaml.gotmpl, checked by scripts/cluster/check-metadata.sh.
+#   cluster   <cluster>.yaml in this folder — gives the kube context and delivery.owner
+#   context   optional: overrides that file's context (e.g. your local EKS alias)
+# Personal override: target.local.yaml next to this file (same shape, gitignored). Precedence:
+#   context: KUBE_CONTEXT_PROD env  >  target.local.yaml  >  target.yaml  >  <cluster>.yaml
+#   owner:   APP_TIER_OWNER env  >  <cluster>.yaml delivery.owner
+# An unreplaced <placeholder> context counts as "not configured": the release guard refuses.
+schema: kubernetes-target/v1alpha1
+cluster: eks-production

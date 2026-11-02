@@ -10,10 +10,9 @@
     // or read as data, never rendered by helm, so keep real YAML validation on.
     "*/manifests/**/*.yaml": "yaml",
     "*/config/*.yaml": "yaml",
-    "infra-base/k8s/env-values/**/*.yaml": "yaml",
-    "argocd/**/*.yaml": "yaml",
-    "applications/**/*.yaml": "yaml",
-    "docs/templates/**/*.yaml": "yaml"
+    "environments/*/kubernetes/**/*.yaml": "yaml",
+    "kubernetes/argocd/**/*.yaml": "yaml",
+    "applications/**/*.yaml": "yaml"
   },
   // The redhat YAML extension only validates files whose language id is "yaml";
   // associating templates to "helm" above already excludes them. Keep real YAML
@@ -22,29 +21,27 @@
   "yaml.schemas": {
     "kubernetes": [
       "*/manifests/**/*.yaml",
-      "bootstrap/manifests/*.yaml",
-      "argocd/**/*.yaml"
+      "environments/*/kubernetes/namespace/*.yaml",
+      "environments/*/kubernetes/network/*.yaml",
+      "kubernetes/argocd/**/*.yaml"
     ],
     // Application files: completion, hover and type/enum/typo checks while typing.
     // The chart schema is used without `required` (generated, make docs-reference),
-    // because each file is one layer and the other layers supply the rest.
+    // because the environments/<env>/kubernetes/app-values layer supplies the rest.
     "./docs/schemas/application-values.overlay.schema.json": [
-      "applications/*/k8s/values.yaml",
-      "applications/*/k8s/*/values.yaml",
-      "docs/templates/eks-app/k8s/values.yaml",
-      "docs/templates/eks-app/k8s/*/values.yaml"
+      "applications/*/k8s/*/values.yaml"
     ],
     "./terraform/schema/app.schema.json": [
       "applications/*/terraform/app.yaml",
-      "docs/templates/*/terraform/app.yaml"
+      "applications/_template/terraform-ecs/app.yaml"
     ],
     "./terraform/schema/app-environment.schema.json": [
       "applications/*/terraform/dev.yaml",
       "applications/*/terraform/staging.yaml",
       "applications/*/terraform/production.yaml",
-      "docs/templates/*/terraform/dev.yaml",
-      "docs/templates/*/terraform/staging.yaml",
-      "docs/templates/*/terraform/production.yaml"
+      "applications/_template/terraform-ecs/dev.yaml",
+      "applications/_template/terraform-ecs/staging.yaml",
+      "applications/_template/terraform-ecs/production.yaml"
     ]
   },
   "files.exclude": {
